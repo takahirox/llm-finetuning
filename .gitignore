@@ -1,0 +1,37 @@
+# Isolated environments and Python build/cache files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# Local model, dataset, and experiment artifacts (keep source/config elsewhere)
+/models/
+/model-downloads/
+/data/
+/datasets/
+/checkpoints/
+/adapters/
+/outputs/
+/runs/
+.cache/
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Local credentials; a documented example may be committed
+.env
+.env.*
+!.env.example
+/secrets/
+*.pem
+*.key
