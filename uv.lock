@@ -153,12 +153,14 @@ name = "llm-finetuning"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "huggingface-hub" },
     { name = "mlx" },
     { name = "mlx-lm" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", specifier = "==2.2.0" },
     { name = "mlx", specifier = "==0.32.3" },
     { name = "mlx-lm", specifier = "==0.32.0" },
 ]
