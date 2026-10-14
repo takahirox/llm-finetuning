@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -42,6 +43,9 @@ class DataTests(unittest.TestCase):
              patch.object(exp, 'DATA_SHA256', exp.hashlib.sha256(raw).hexdigest()):
             exp.prepare_data(SimpleNamespace(data=str(path)),
                              {'data_seed': 42, 'eval_size': 3, 'validation_size': 2})
+        manifest = exp.read_json(path / 'manifest.json')
+        manifest['source_sha256'] = exp.DATA_SHA256  # Fixture source stands in for pinned download.
+        exp.write_json(path / 'manifest.json', manifest)
         return exp.dataset_info(path)
 
     def test_prepared_files_exclude_heldout_material_and_detect_tampering(self):
@@ -67,6 +71,30 @@ class DataTests(unittest.TestCase):
             exp.write_json(path / 'manifest.json', manifest)
             with self.assertRaisesRegex(ValueError, 'overlap'):
                 exp.dataset_info(path)
+
+    def test_full_official_split_has_exactly_500_ids_once_and_seeded_order(self):
+        self.rows = [row(i) for i in range(1, 975)]
+        groups = exp.select_data(self.rows, 42, 500, 20)
+        self.assertEqual([len(g) for g in groups], [354, 20, 500])
+        ids = [r['task_id'] for r in groups[2]]
+        self.assertEqual(sorted(ids), list(range(11, 511)))
+        self.assertEqual(len(set(ids)), 500)
+        self.assertEqual(ids[:50], [r['task_id'] for r in exp.select_data(self.rows, 42, 50, 20)[2]])
+        self.assertEqual(groups, exp.select_data(list(reversed(self.rows)), 42, 500, 20))
+        with self.assertRaises(ValueError):
+            exp.select_data([r for r in self.rows if r['task_id'] != 11], 42, 500, 20)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'full'
+            raw = '\n'.join(json.dumps(r) for r in self.rows).encode()
+            with patch.object(exp.urllib.request, 'urlopen', return_value=io.BytesIO(raw)), \
+                 patch.object(exp, 'DATA_SHA256', exp.hashlib.sha256(raw).hexdigest()):
+                exp.prepare_data(SimpleNamespace(data=path), {'data_seed': 42, 'eval_size': 500, 'validation_size': 20})
+                manifest = exp.dataset_info(path)
+            self.assertEqual(sorted(manifest['ids']['eval']), list(range(11, 511)))
+            self.assertEqual(manifest['source_revision'], exp.DATA_REVISION)
+            self.assertEqual(manifest['test_version'], exp.TEST_VERSION)
+            self.assertEqual(manifest['seed'], 42)
+            self.assertTrue(set(manifest['ids']['eval']).isdisjoint(manifest['ids']['train'] + manifest['ids']['valid']))
 
     def test_prompt_has_assertions_but_no_reference_solution(self):
         prompt = exp.messages(row(12))
@@ -179,78 +207,160 @@ class AdapterTests(unittest.TestCase):
 
 
 class SandboxTests(unittest.TestCase):
-    settings = {'wall_seconds': 5, 'cpu_seconds': 2, 'memory_mb': 128}
+    settings = {'startup_seconds': 30, 'wall_seconds': 5, 'cpu_seconds': 2, 'memory_mb': 128}
 
-    def test_scoring_pass_failure_and_docker_error(self):
-        for exit_code in (0, 1, 137, 125, 126, 127):
-            with self.subTest(exit_code=exit_code), patch.object(sandbox.subprocess, 'run') as run:
-                run.side_effect = [SimpleNamespace(returncode=exit_code), SimpleNamespace(returncode=0)]
-                if exit_code in (125, 126, 127):
+    def process(self, code=0):
+        process = Mock(returncode=code)
+        process.poll.return_value = code
+        return process
+
+    def test_startup_is_separate_from_execution_and_limits_are_preserved(self):
+        process = self.process()
+        with patch.object(sandbox.subprocess, 'Popen', return_value=process) as launch, \
+             patch.object(sandbox, 'await_ready') as ready, \
+             patch.object(sandbox, 'container_state', return_value={'Status': 'exited', 'ExitCode': 0}), \
+             patch.object(sandbox.time, 'monotonic', side_effect=[0, 25, 26]), \
+             patch.object(sandbox, 'remove_container') as cleanup:
+            outcome = sandbox.score('pass', row(11), 'image', self.settings)
+        self.assertTrue(outcome['passed'])
+        self.assertEqual(outcome['startup_seconds'], 25)
+        self.assertEqual(outcome['execution_wait_seconds'], 1)
+        self.assertEqual(ready.call_args.args[:2], (process, 30))
+        self.assertEqual(process.communicate.call_args.kwargs['timeout'], 5)
+        payload = json.loads(ready.call_args.args[2])
+        self.assertEqual(payload['tests'], row(11)['test_list'])
+        command = launch.call_args.args[0]
+        for flag in ('--read-only', '--network', 'none', '--memory', '--pids-limit', '--cap-drop', 'ALL'):
+            self.assertIn(flag, command)
+        self.assertNotIn('-v', command)
+        cleanup.assert_called_once()
+        process.wait.assert_called_once_with(timeout=15)
+
+    def test_pass_failure_timeout_and_infrastructure_errors(self):
+        for code in (0, 1, 124, 137, 125, 126, 127):
+            process = self.process(code)
+            with self.subTest(code=code), patch.object(sandbox.subprocess, 'Popen', return_value=process), \
+                 patch.object(sandbox, 'await_ready'), patch.object(sandbox, 'remove_container') as cleanup, \
+                 patch.object(sandbox, 'container_state', return_value={'Status': 'exited', 'ExitCode': code}):
+                if code in (125, 126, 127):
                     with self.assertRaisesRegex(ValueError, 'Docker execution failed'):
-                        sandbox.score('solution', row(11), 'image', self.settings)
-                else:
-                    outcome = sandbox.score('solution', row(11), 'image', self.settings)
-                    self.assertEqual(outcome['passed'], exit_code == 0)
-                command = run.call_args_list[0].args[0]
-                self.assertIn('--read-only', command)
-                self.assertIn('--network', command)
-                self.assertIn('none', command)
-                self.assertIn('--memory', command)
-                self.assertIn('--pids-limit', command)
-                self.assertNotIn('-v', command)
-                payload = json.loads(run.call_args_list[0].kwargs['input'])
-                self.assertEqual(payload['tests'], row(11)['test_list'])
-                self.assertEqual(run.call_args_list[-1].args[0][:3], ['docker', 'rm', '-f'])
-
-    def test_timeout_kills_container_and_counts_failure(self):
-        with patch.object(sandbox.subprocess, 'run') as run:
-            run.side_effect = [subprocess.TimeoutExpired('docker', 5), SimpleNamespace(returncode=0)]
-            self.assertEqual(sandbox.score('while True: pass', row(11), 'image', self.settings)['status'], 'timeout')
-            self.assertEqual(run.call_count, 2)
-
-    def test_failed_removal_tolerates_confirmed_absent_container(self):
-        for execution in (SimpleNamespace(returncode=0), subprocess.TimeoutExpired('docker', 5)):
-            with self.subTest(execution=execution), patch.object(sandbox.subprocess, 'run') as run:
-                run.side_effect = [execution, SimpleNamespace(returncode=1),
-                                   SimpleNamespace(returncode=0, stdout='')]
-                outcome = sandbox.score('pass', row(11), 'image', self.settings)
-                self.assertEqual(outcome['status'], 'timeout' if isinstance(execution, Exception) else 'passed')
-                self.assertEqual(run.call_count, 3)
-                name = run.call_args_list[1].args[0][-1]
-                self.assertEqual(run.call_args.args[0],
-                                 ['docker', 'container', 'ls', '--all', '--quiet', '--filter', f'name=^/{name}$'])
-                self.assertEqual(run.call_args.kwargs['timeout'], 15)
-
-    def test_failed_removal_aborts_if_container_remains_or_absence_is_unconfirmed(self):
-        checks = (SimpleNamespace(returncode=0, stdout='container-id\n'),
-                  SimpleNamespace(returncode=1, stdout=''),
-                  subprocess.TimeoutExpired('docker', 15), OSError('Docker unavailable'))
-        for execution in (SimpleNamespace(returncode=0), subprocess.TimeoutExpired('docker', 5)):
-            for check in checks:
-                with self.subTest(execution=execution, check=check), patch.object(sandbox.subprocess, 'run') as run:
-                    run.side_effect = [execution, SimpleNamespace(returncode=1), check]
-                    with self.assertRaisesRegex(ValueError, 'clean up.*docker rm -f mbpp-'):
                         sandbox.score('pass', row(11), 'image', self.settings)
+                else:
+                    self.assertEqual(sandbox.score('pass', row(11), 'image', self.settings)['passed'], code == 0)
+                cleanup.assert_called_once()
+        process = self.process()
+        process.poll.return_value = None
+        process.communicate.side_effect = subprocess.TimeoutExpired('docker', 5)
+        with patch.object(sandbox.subprocess, 'Popen', return_value=process), \
+             patch.object(sandbox, 'await_ready'), patch.object(sandbox, 'remove_container') as cleanup, \
+             patch.object(sandbox, 'container_state', return_value={'Status': 'running'}):
+            self.assertEqual(sandbox.score('pass', row(11), 'image', self.settings)['status'], 'timeout')
+        cleanup.assert_called_once()
+        process.kill.assert_called_once()
 
-    def test_missing_docker_and_cleanup_error_abort(self):
+    def test_delayed_cli_exit_does_not_turn_completed_code_into_timeout(self):
+        for code, status in ((0, 'passed'), (1, 'failed'), (124, 'timeout')):
+            process = self.process()
+            process.communicate.side_effect = subprocess.TimeoutExpired('docker', 5)
+            with patch.object(sandbox.subprocess, 'Popen', return_value=process), \
+                 patch.object(sandbox, 'await_ready'), patch.object(sandbox, 'remove_container'), \
+                 patch.object(sandbox, 'container_state', return_value={'Status': 'exited', 'ExitCode': code}):
+                self.assertEqual(sandbox.score('pass', row(11), 'image', self.settings)['status'], status)
+        self.assertIn("signal.setitimer(signal.ITIMER_REAL, payload['wall_seconds'])", sandbox.RUNNER)
+
+    def test_startup_failure_never_enters_execution_and_cleans_up(self):
+        process = self.process()
+        with patch.object(sandbox.subprocess, 'Popen', return_value=process), \
+             patch.object(sandbox, 'await_ready', side_effect=ValueError('startup timeout')), \
+             patch.object(sandbox, 'remove_container') as cleanup:
+            with self.assertRaisesRegex(ValueError, 'startup timeout'):
+                sandbox.score('pass', row(11), 'image', self.settings)
+        process.communicate.assert_not_called()
+        cleanup.assert_called_once()
+
+    def test_readiness_handshake_eof_partial_and_deadline(self):
+        for data, error in ((sandbox.READY, None), (b'', 'before readiness'), (b'bad', 'before readiness')):
+            read_fd, write_fd = os.pipe()
+            input_read, input_write = os.pipe()
+            with os.fdopen(read_fd, 'rb', buffering=0) as stream, os.fdopen(input_write, 'wb', buffering=0) as stdin:
+                os.write(write_fd, data)
+                os.close(write_fd)
+                process = SimpleNamespace(stdout=stream, stdin=stdin)
+                try:
+                    if error:
+                        with self.assertRaisesRegex(ValueError, error):
+                            sandbox.await_ready(process, 1, b'{}')
+                    else:
+                        sandbox.await_ready(process, 1, b'{}')
+                        self.assertEqual(os.read(input_read, 3), b'{}\n')
+                finally:
+                    os.close(input_read)
+        with patch.object(sandbox.os, 'set_blocking'), \
+             patch.object(sandbox.select, 'select', return_value=([], [], [])):
+            with self.assertRaisesRegex(ValueError, 'startup/readiness timeout'):
+                sandbox.await_ready(SimpleNamespace(stdout=Mock(), stdin=Mock()), 30, b'{}')
+        with patch.object(sandbox.os, 'set_blocking'), \
+             patch.object(sandbox.select, 'select', side_effect=[([], [1], []), ([1], [], []), ([1], [], [])]), \
+             patch.object(sandbox.os, 'write', return_value=3), \
+             patch.object(sandbox.os, 'read', side_effect=[b'MBPP_', b'READY\n']):
+            sandbox.await_ready(SimpleNamespace(stdout=Mock(), stdin=Mock()), 30, b'{}')
+
+    def test_daemon_errors_and_exit_mismatch_fail_closed(self):
+        for state in ({'Status': 'running'}, {'Status': 'exited', 'ExitCode': 0}):
+            with patch.object(sandbox.subprocess, 'Popen', return_value=self.process(1)), \
+                 patch.object(sandbox, 'await_ready'), patch.object(sandbox, 'remove_container'), \
+                 patch.object(sandbox, 'container_state', return_value=state):
+                with self.assertRaisesRegex(ValueError, 'exit/state mismatch'):
+                    sandbox.score('pass', row(11), 'image', self.settings)
+        for result in (subprocess.TimeoutExpired('docker', 15), OSError(),
+                       SimpleNamespace(stdout='{}'), SimpleNamespace(stdout='not JSON'),
+                       SimpleNamespace(stdout='{"Status":"exited","Error":"daemon failure"}')):
+            with patch.object(sandbox.subprocess, 'run', side_effect=[result]):
+                with self.assertRaisesRegex(ValueError, 'state unavailable'):
+                    sandbox.container_state('name')
+        process = self.process()
+        process.communicate.side_effect = subprocess.TimeoutExpired('docker', 5)
+        with patch.object(sandbox.subprocess, 'Popen', return_value=process), \
+             patch.object(sandbox, 'await_ready'), patch.object(sandbox, 'remove_container') as cleanup, \
+             patch.object(sandbox, 'container_state', side_effect=ValueError('state unavailable')):
+            with self.assertRaisesRegex(ValueError, 'state unavailable'):
+                sandbox.score('pass', row(11), 'image', self.settings)
+        cleanup.assert_called_once()
+
+    def test_cleanup_requires_confirmed_removal(self):
+        for check, success in ((SimpleNamespace(returncode=0, stdout=''), True),
+                               (SimpleNamespace(returncode=0, stdout='container'), False),
+                               (SimpleNamespace(returncode=1, stdout=''), False),
+                               (subprocess.TimeoutExpired('docker', 15), False), (OSError(), False)):
+            with patch.object(sandbox.subprocess, 'run', side_effect=[SimpleNamespace(returncode=1), check]):
+                if success:
+                    sandbox.remove_container('mbpp-test')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'clean up.*docker rm -f'):
+                        sandbox.remove_container('mbpp-test')
+        with patch.object(sandbox.subprocess, 'Popen', return_value=self.process()), \
+             patch.object(sandbox, 'await_ready'), \
+             patch.object(sandbox, 'container_state', return_value={'Status': 'exited', 'ExitCode': 0}), \
+             patch.object(sandbox, 'remove_container', side_effect=ValueError('cleanup failed')):
+            with self.assertRaisesRegex(ValueError, 'cleanup failed'):
+                sandbox.score('pass', row(11), 'image', self.settings)
+
+    def test_missing_docker_aborts(self):
         with patch.object(sandbox.subprocess, 'run', side_effect=FileNotFoundError):
             with self.assertRaisesRegex(ValueError, 'Docker/image unavailable'):
                 sandbox.resolve_image('image')
-        with patch.object(sandbox.subprocess, 'run') as run:
-            run.side_effect = [SimpleNamespace(returncode=0), subprocess.TimeoutExpired('docker', 15)]
-            with self.assertRaisesRegex(ValueError, 'clean up'):
-                sandbox.score('pass', row(11), 'image', self.settings)
 
 
 class EvaluationTests(unittest.TestCase):
     def test_persists_each_solution_and_compares_same_examples(self):
         config = exp.read_json(exp.CONFIG)
+        config['eval_size'] = 2
         problems = [row(11), row(12)]
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'evaluation.json'
             args = SimpleNamespace(model='model', data='data', image='image', adapter=None, output=output)
             with patch.object(exp, 'model_info', return_value={'revision': 'base'}), \
-                 patch.object(exp, 'dataset_info', return_value={'ids': {'eval': [11, 12]}}), \
+                 patch.object(exp, 'dataset_info', return_value={'ids': {'eval': [11, 12]}, 'seed': 42}), \
                  patch.object(exp, 'read_jsonl', return_value=problems), \
                  patch.object(exp, 'resolve_image', return_value='sha256:fixture'), \
                  patch.object(exp, 'load_generator', return_value=(Mock(side_effect=['def f11(): return 11', '```python']), None)), \
@@ -269,11 +379,12 @@ class EvaluationTests(unittest.TestCase):
 
     def test_infrastructure_failure_leaves_incomplete_evaluation(self):
         config = exp.read_json(exp.CONFIG)
+        config['eval_size'] = 1
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'evaluation.json'
             args = SimpleNamespace(model='model', data='data', image='image', adapter=None, output=output)
             with patch.object(exp, 'model_info', return_value={}), \
-                 patch.object(exp, 'dataset_info', return_value={}), \
+                 patch.object(exp, 'dataset_info', return_value={'seed': 42}), \
                  patch.object(exp, 'read_jsonl', return_value=[row(11)]), \
                  patch.object(exp, 'resolve_image', return_value='image'), \
                  patch.object(exp, 'load_generator', return_value=(Mock(return_value='pass'), None)), \
@@ -282,17 +393,116 @@ class EvaluationTests(unittest.TestCase):
                     exp.evaluate(args, config)
             self.assertEqual(exp.read_json(output)['status'], 'running')
 
+    def test_rescore_reuses_complete_generations_after_scoring_failure(self):
+        config = exp.read_json(exp.CONFIG)
+        config['eval_size'] = 2
+        with tempfile.TemporaryDirectory() as temporary:
+            original = Path(temporary) / 'original.json'
+            rescored = Path(temporary) / 'rescored.json'
+            args = SimpleNamespace(model='model', data='data', image='image', adapter=None, output=original)
+            generator = Mock(side_effect=['def f11(): return 11', '```python'])
+            with patch.object(exp, 'model_info', return_value={}), \
+                 patch.object(exp, 'dataset_info', return_value={'seed': 42}), \
+                 patch.object(exp, 'read_jsonl', return_value=[row(11), row(12)]), \
+                 patch.object(exp, 'resolve_image', return_value='image'), \
+                 patch.object(exp, 'load_generator', return_value=(generator, None)), \
+                 patch.object(exp, 'score', side_effect=ValueError('startup failure')):
+                with self.assertRaises(ValueError):
+                    exp.evaluate(args, config)
+            saved = exp.read_json(original)
+            self.assertEqual(saved['generation_status'], 'complete')
+            self.assertEqual(len(saved['problems']), 2)
+            original_hash = exp.file_hash(original)
+            with patch.object(exp, 'resolve_image', return_value='image'), \
+                 patch.object(exp, 'load_generator', side_effect=AssertionError('Must not regenerate')), \
+                 patch.object(exp, 'score', return_value={'passed': True, 'status': 'passed', 'exit_code': 0}) as scoring:
+                exp.rescore(SimpleNamespace(input=original, output=rescored, image='image'), config)
+            result = exp.read_json(rescored)
+            self.assertEqual(result['status'], 'complete')
+            self.assertEqual(exp.generation_rows(result), exp.generation_rows(saved))
+            self.assertEqual(result['generations_sha256'], saved['generations_sha256'])
+            self.assertEqual(result['rescored_from']['sha256'], original_hash)
+            self.assertEqual(exp.file_hash(original), original_hash)
+            self.assertEqual(scoring.call_count, 1)  # Invalid formatting stays invalid.
+            self.assertEqual(result['protocol']['generation_harness'], saved['protocol']['generation_harness'])
+            exp.validate_scored(result)
+
+    def test_rescore_rejects_partial_or_changed_code_and_preserves_generation_provenance(self):
+        baseline, _ = ComparisonTests().results()
+        baseline['generations_sha256'] = exp.digest(exp.generation_rows(baseline))
+        with tempfile.TemporaryDirectory() as temporary:
+            original = Path(temporary) / 'original.json'
+            output = Path(temporary) / 'rescored.json'
+            args = SimpleNamespace(input=original, output=output, image='new-image')
+            for change in ('partial', 'solution', 'response', 'checksum'):
+                invalid = copy.deepcopy(baseline)
+                if change == 'partial':
+                    invalid['generation_status'] = 'running'
+                elif change == 'solution':
+                    invalid['problems'][0]['solution'] = 'changed'
+                elif change == 'response':
+                    invalid['problems'][0].update(response='changed', solution='changed\n')
+                else:
+                    invalid.pop('generations_sha256')
+                exp.write_json(original, invalid)
+                with self.assertRaises(ValueError):
+                    exp.rescore(args, exp.read_json(exp.CONFIG))
+                self.assertFalse(output.exists())
+            legacy = copy.deepcopy(baseline)
+            legacy.pop('generation_status')
+            legacy.pop('generations_sha256')
+            legacy['protocol']['scorer_version'] = 'docker-mbpp-v1'
+            legacy['protocol']['harness'] = {'experiment.py': legacy['protocol'].pop('generation_harness')}
+            exp.write_json(original, legacy)
+            config = exp.read_json(exp.CONFIG)
+            config['scoring']['wall_seconds'] = 20
+            with patch.object(exp, 'resolve_image', return_value='new-image-id'), \
+                 patch.object(exp, 'score', return_value={'passed': False, 'status': 'failed', 'exit_code': 1}):
+                exp.rescore(args, config)
+            result = exp.read_json(output)
+            for key in ('model', 'dataset', 'examples', 'prompt_version', 'decoding', 'versions'):
+                self.assertEqual(result['protocol'][key], baseline['protocol'][key])
+            self.assertEqual(result['protocol']['scoring']['wall_seconds'], 20)
+            self.assertEqual(result['protocol']['scorer_version'], exp.SCORER_VERSION)
+            self.assertEqual(result['protocol']['image'], 'new-image-id')
+
+    def test_configuration_must_match_prepared_evaluation_size_and_seed(self):
+        config = exp.read_json(exp.CONFIG)
+        args = SimpleNamespace(model='model', data='data')
+        with patch.object(exp, 'model_info', return_value={}), \
+             patch.object(exp, 'dataset_info', return_value={'seed': 42}), \
+             patch.object(exp, 'read_jsonl', return_value=[row(11)]), \
+             patch.object(exp, 'load_generator') as load:
+            with self.assertRaisesRegex(ValueError, 'size/seed'):
+                exp.evaluate(args, config)
+            load.assert_not_called()
+
+
 
 class ComparisonTests(unittest.TestCase):
     def results(self):
-        baseline = {'status': 'complete', 'adapter': None,
-                    'protocol': {'dataset': {'ids': [11, 12], 'created_at': 'yesterday'},
-                                 'examples': [{'task_id': 11}, {'task_id': 12}], 'decoding': {'seed': 42}},
-                    'problems': [{'task_id': 11, 'passed': True}, {'task_id': 12, 'passed': False}]}
+        baseline = {'status': 'complete', 'generation_status': 'complete', 'adapter': None,
+                    'protocol': {'model': {'revision': 'base'}, 'dataset': {'ids': [11, 12], 'created_at': 'yesterday'},
+                                 'examples': [row(11), row(12)], 'decoding': {'seed': 42},
+                                 'prompt_version': exp.PROMPT_VERSION, 'versions': {'mlx': 'fixture'},
+                                 'scorer_version': exp.SCORER_VERSION, 'test_version': exp.TEST_VERSION,
+                                 'image': 'sha256:fixture', 'image_reference': 'image', 'scoring_python': 'fixture',
+                                 'scoring_harness': {'sandbox.py': 'hash'}, 'generation_harness': 'generation-hash',
+                                 'scoring': {'startup_seconds': 30, 'wall_seconds': 10, 'cpu_seconds': 3, 'memory_mb': 256}},
+                    'problems': [{'task_id': 11, 'response': 'pass', 'solution': 'pass\n',
+                                  'passed': True, 'status': 'passed', 'exit_code': 0},
+                                 {'task_id': 12, 'response': 'pass', 'solution': 'pass\n',
+                                  'passed': False, 'status': 'failed', 'exit_code': 1}]}
+        baseline['generations_sha256'] = exp.digest(exp.generation_rows(baseline))
+        baseline['summary'] = exp.aggregate(baseline['problems'])
         adapted = copy.deepcopy(baseline)
         adapted['adapter'] = {'path': 'adapter'}
-        adapted['problems'][1]['passed'] = True
+        self.set_pass(adapted, 1, True)
         return baseline, adapted
+
+    def set_pass(self, result, index, passed):
+        result['problems'][index].update(passed=passed, status='passed' if passed else 'failed', exit_code=0 if passed else 1)
+        result['summary'] = exp.aggregate(result['problems'])
 
     def test_scores_changes_and_negative_difference(self):
         baseline, adapted = self.results()
@@ -302,8 +512,8 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(report['adapted']['pass_at_1_percent'], 100)
         self.assertEqual(report['difference_percentage_points'], 50)
         self.assertEqual([r['changed'] for r in report['outcomes']], [False, True])
-        adapted['problems'][0]['passed'] = False
-        adapted['problems'][1]['passed'] = False
+        self.set_pass(adapted, 0, False)
+        self.set_pass(adapted, 1, False)
         self.assertEqual(exp.compare_results(baseline, adapted)['difference_percentage_points'], -50)
 
     def test_mismatched_or_incomplete_evaluations_are_rejected(self):
@@ -329,10 +539,54 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'adapter-free'):
             exp.compare_results(baseline, adapted)
 
+    def test_all_four_transitions_and_changed_task_ids(self):
+        baseline, adapted = self.results()
+        for result in (baseline, adapted):
+            result['protocol']['examples'] += [row(13), row(14)]
+            result['problems'] += [{**result['problems'][0], 'task_id': 13},
+                                   {**result['problems'][1], 'task_id': 14}]
+        for result in (baseline, adapted):
+            result['generations_sha256'] = exp.digest(exp.generation_rows(result))
+        self.set_pass(baseline, 3, False)
+        self.set_pass(adapted, 2, False)
+        self.set_pass(adapted, 3, False)
+        report = exp.compare_results(baseline, adapted)
+        self.assertEqual(report['transitions'], {'fail_to_pass': 1, 'pass_to_fail': 1,
+                                                'unchanged_pass': 1, 'unchanged_fail': 1})
+        self.assertEqual(report['changed_task_ids'], {'fail_to_pass': [12], 'pass_to_fail': [13]})
+        self.assertEqual(report['net_correct_change'], 0)
+        self.assertEqual(report['difference_percentage_points'], 0)
+
+    def test_provenance_and_invalid_scoring_are_rejected(self):
+        for key, value in (('model', {'revision': 'other'}), ('image', 'other-image'),
+                           ('prompt_version', 'other'), ('versions', {'mlx': 'other'}),
+                           ('scoring', {'startup_seconds': 1, 'wall_seconds': 20, 'cpu_seconds': 3, 'memory_mb': 256}),
+                           ('scoring_harness', {'sandbox.py': 'other-hash'})):
+            baseline, adapted = self.results()
+            adapted['protocol'][key] = value
+            with self.assertRaisesRegex(ValueError, 'protocols differ'):
+                exp.compare_results(baseline, adapted)
+        for change in ('missing-status', 'infra-status', 'pass-flag', 'summary', 'old-scorer', 'missing-protocol'):
+            baseline, adapted = self.results()
+            if change == 'missing-status':
+                adapted['problems'][0].pop('status')
+            elif change == 'infra-status':
+                adapted['problems'][0]['status'] = 'startup_error'
+            elif change == 'pass-flag':
+                adapted['problems'][0]['passed'] = False
+            elif change == 'summary':
+                adapted['summary']['passed'] = 0
+            elif change == 'old-scorer':
+                adapted['protocol']['scorer_version'] = 'docker-mbpp-v1'
+            else:
+                adapted['protocol'].pop('scoring_harness')
+            with self.assertRaises((ValueError, KeyError)):
+                exp.compare_results(baseline, adapted)
+
     def test_default_config_and_rejects_unbounded_or_full_training(self):
         config = exp.read_json(exp.CONFIG)
         exp.validate_config(config)
-        for section, key, value in (('decoding', 'max_tokens', -1), ('scoring', 'wall_seconds', 0),
+        for section, key, value in (('decoding', 'max_tokens', -1), ('scoring', 'wall_seconds', 0), ('scoring', 'startup_seconds', 0),
                                     ('training', 'fine_tune_type', 'full')):
             modified = copy.deepcopy(config)
             modified[section][key] = value

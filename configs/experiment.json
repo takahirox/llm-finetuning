@@ -6,7 +6,7 @@
   "eval_size": 50,
   "validation_size": 20,
   "decoding": {"seed": 42, "temperature": 0.0, "top_p": 1.0, "max_tokens": 512},
-  "scoring": {"wall_seconds": 10, "cpu_seconds": 3, "memory_mb": 256},
+  "scoring": {"startup_seconds": 30, "wall_seconds": 10, "cpu_seconds": 3, "memory_mb": 256},
   "training": {
     "seed": 42,
     "fine_tune_type": "lora",
