@@ -89,7 +89,8 @@ an ignored path (for example `outputs/custom-config.json`) and pass
 `--config outputs/custom-config.json` **before** the subcommand at every stage.
 Use new data, adapter, and result paths for each configuration. Commands refuse to
 overwrite outputs; an interrupted evaluation remains marked `running` and cannot
-be compared. Re-run it with a fresh output filename.
+be compared. If all generations were saved, use `rescore` with a fresh output
+filename; otherwise rerun evaluation with a fresh filename.
 
 ### 1. Download and convert the model once
 
@@ -190,7 +191,10 @@ docker pull python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9d
 
 Omitting `--adapter` explicitly selects the base model. The command saves one raw
 response, extracted Python solution, pass/fail status, and exit code per problem,
-plus a final `pass_at_1_percent` summary. A problem passes only when all its
+plus a final `pass_at_1_percent` summary. All generations are saved before scoring;
+`generation_status: complete` and a generation SHA-256 make them reusable even if
+scoring aborts. See the [500-problem procedure](docs/mbpp-500-evaluation.md).
+A problem passes only when all its
 assertions finish successfully. Failed assertions, syntax/runtime/resource errors,
 format errors, and wall timeouts score zero. Pass@1 is the percentage of problems
 passing all assertions with one completion, not the percentage of individual
@@ -201,10 +205,18 @@ Generated code is **untrusted**. Scoring requires Docker and has no host-executi
 fallback. Each problem gets a fresh non-root container with no network, host mounts,
 or credentials; a read-only root filesystem; dropped capabilities; no-new-privileges;
 32-process and 64-file-descriptor limits; a 16 MB temporary filesystem; 256 MB RAM
-and no additional swap; one CPU; three CPU seconds; and a ten-second wall deadline
-including container startup. Output is discarded to avoid unbounded logs. Setup,
+and no additional swap; one CPU; three CPU seconds; and a ten-second code-execution
+wall deadline. A separate 30-second startup
+deadline covers container startup, payload delivery, and trusted Python setup.
+Python signals readiness before executing setup code, the solution, or assertions;
+only then do independent host and in-container execution timers start. Startup
+and execution-wait timings are recorded per task; verified container exits avoid
+counting delayed Docker CLI exit delivery as a model timeout. Output is discarded
+to avoid unbounded logs. Setup,
 solution, and assertions execute in that order; Python random/hash seeds are fixed.
 The container is forcibly removed after every attempt, including wall timeouts.
+Container state is checked against the CLI exit before accepting
+an outcome; startup/readiness, Docker state, and cleanup errors abort scoring.
 Docker infrastructure failures abort the run instead of masquerading as model errors.
 
 Containers reduce risk but are not a proof of security. Use a disposable Docker VM
@@ -269,12 +281,19 @@ robust improvement.
 ```
 
 Comparison prints/saves both percentages, the signed absolute percentage-point
-difference (`adapted - baseline`), and every problem's before/after outcome and
-change flag. Negative or zero differences are valid outcomes. Comparison rejects
+difference (`adapted - baseline`), net correct change, four transition counts
+(fail→pass, pass→fail, unchanged-pass, unchanged-fail), and changed task IDs. The
+JSON also contains every problem's before/after outcome and change flag. Negative
+or zero differences are valid outcomes. Comparison rejects
 incomplete runs, adapter-contaminated baselines, missing adapted selections, or
 changes in model hashes/revision, ordered examples, dataset files, prompt/scorer
 implementation, decoding, execution settings, image, or library versions. Results
-retain raw generations and useful provenance so a score can be audited.
+retain raw generations and useful provenance so a score can be audited. Old
+startup-inclusive scores must be rescored before comparison with this scorer.
+
+For the complete official test split using the existing 100-step adapter, follow
+the [copy-and-run 500-problem procedure](docs/mbpp-500-evaluation.md), including
+rescoring commands. Do not retrain or overwrite the original 50-task outputs.
 
 All weights, downloaded data, adapters, and results belong in the ignored local
 paths shown above. Do not add them to Git. Useful reusable configuration belongs

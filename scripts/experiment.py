@@ -22,7 +22,8 @@ DATA_REVISION = 'f82046ba5aabbbb427dbfd38a254d26bff08b533'
 DATA_URL = f'https://raw.githubusercontent.com/google-research/google-research/{DATA_REVISION}/mbpp/mbpp.jsonl'
 DATA_SHA256 = 'ccf64ceae9c5403bf50a044cb6d505bfd2a2963ee58338ba268fd65beab92a9f'
 PROMPT_VERSION = 'mbpp-tests-chat-v1'
-SCORER_VERSION = 'docker-mbpp-v1'
+SCORER_VERSION = 'docker-mbpp-ready-v2'
+TEST_VERSION = 'mbpp-standard-test-list-v1'
 DEFAULT_IMAGE = 'python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36'
 
 
@@ -113,6 +114,8 @@ def select_data(rows, seed, eval_size, validation_size):
         raise ValueError('Duplicate MBPP task IDs.')
     train = sorted((r for r in rows if 601 <= r['task_id'] <= 974), key=lambda r: r['task_id'])
     heldout = sorted((r for r in rows if 11 <= r['task_id'] <= 510), key=lambda r: r['task_id'])
+    if eval_size == 500 and {r['task_id'] for r in heldout} != set(range(11, 511)):
+        raise ValueError('Full evaluation requires exactly official MBPP test IDs 11–510.')
     if not 0 < validation_size < len(train) or not 0 < eval_size <= len(heldout):
         raise ValueError('Evaluation/validation sample sizes exceed available split or are empty.')
     random.Random(seed).shuffle(train)
@@ -147,7 +150,8 @@ def prepare_data(args, config):
                                     for r in groups[2]])
     write_json(path / 'manifest.json', {
         **provenance(), 'source': DATA_URL, 'source_sha256': DATA_SHA256,
-        'seed': config['data_seed'], 'prompt_version': PROMPT_VERSION,
+        'source_revision': DATA_REVISION, 'eval_size': config['eval_size'],
+        'seed': config['data_seed'], 'prompt_version': PROMPT_VERSION, 'test_version': TEST_VERSION,
         'ids': {name: [r['task_id'] for r in rows]
                 for name, rows in zip(('train', 'valid', 'eval'), groups)},
         'files': {name: file_hash(path / name) for name in ('train.jsonl', 'valid.jsonl', 'eval.jsonl')},
@@ -160,7 +164,15 @@ def dataset_info(path):
     manifest = read_json(path / 'manifest.json')
     if manifest['prompt_version'] != PROMPT_VERSION:
         raise ValueError('Dataset prompt version differs; prepare a fresh dataset.')
+    if manifest['source'] != DATA_URL or manifest['source_sha256'] != DATA_SHA256:
+        raise ValueError('Dataset source/checksum differs from pinned MBPP.')
+    if manifest.get('source_revision', DATA_REVISION) != DATA_REVISION or manifest.get('test_version', TEST_VERSION) != TEST_VERSION:
+        raise ValueError('Dataset source revision or test format differs.')
     ids = manifest['ids']
+    if manifest.get('eval_size', len(ids['eval'])) != len(ids['eval']) or not ids['eval']:
+        raise ValueError('Dataset evaluation size differs from manifest or is empty.')
+    if len(ids['eval']) == 500 and set(ids['eval']) != set(range(11, 511)):
+        raise ValueError('Full evaluation requires exactly official MBPP test IDs 11–510.')
     all_ids = sum((ids[k] for k in ('train', 'valid', 'eval')), [])
     if len(all_ids) != len(set(all_ids)):
         raise ValueError('Dataset splits overlap or contain duplicate IDs.')
@@ -306,42 +318,142 @@ def aggregate(rows):
     return {'total': len(rows), 'passed': passed, 'pass_at_1_percent': 100 * passed / len(rows)}
 
 
+def scoring_protocol(config, image_reference):
+    return {'scorer_version': SCORER_VERSION, 'test_version': TEST_VERSION,
+            'scoring': {'startup_seconds': 30, **config['scoring']},
+            'image': resolve_image(image_reference), 'image_reference': image_reference,
+            'scoring_python': platform.python_version(),
+            'scoring_harness': {p.name: file_hash(p) for p in (
+                Path(__file__), Path(__file__).with_name('evaluation_sandbox.py'))}}
+
+
+def generation_rows(result):
+    return [{k: r[k] for k in ('task_id', 'response', 'solution')} for r in result['problems']]
+
+
+def validate_generations(result):
+    expected = [r['task_id'] for r in result['protocol']['examples']]
+    if not expected or len(expected) != len(set(expected)) or [r['task_id'] for r in result['problems']] != expected:
+        raise ValueError('Generated task IDs/order differ from the complete protocol.')
+    for row in result['problems']:
+        try:
+            solution = extract_code(row['response'])
+        except ValueError:
+            solution = ''
+        if row['solution'] != solution:
+            raise ValueError('Saved solution differs from the extracted response.')
+    fingerprint = digest(generation_rows(result))
+    if 'generation_status' in result and result['generation_status'] == 'complete' and 'generations_sha256' not in result:
+        raise ValueError('Complete saved generations lack a checksum.')
+    if result.get('generations_sha256', fingerprint) != fingerprint:
+        raise ValueError('Saved generations checksum mismatch.')
+    return fingerprint
+
+
+def score_saved(result, output):
+    # All generations are persisted first, so even a startup failure can be rescored.
+    result['status'] = 'running'
+    result.pop('summary', None)
+    result.pop('finished_at', None)
+    protocol = result['protocol']
+    problems = protocol['examples']
+    generations = generation_rows(result)
+    # Keep the complete immutable generation set in the file throughout scoring.
+    result['problems'] = generations
+    write_json(output, result)
+    for index, (row, problem) in enumerate(zip(generations, problems)):
+        if not row['solution']:
+            outcome = {'passed': False, 'status': 'format_error', 'exit_code': None}
+        else:
+            outcome = score(row['solution'], problem, protocol['image'], protocol['scoring'])
+        result['problems'][index] = {**row, **outcome}
+        write_json(output, result)
+        print(f"{problem['task_id']}: {outcome['status']}", flush=True)
+    result.update(status='complete', summary=aggregate(result['problems']),
+                  finished_at=datetime.now(timezone.utc).isoformat())
+    write_json(output, result)
+    print(json.dumps(result['summary'], indent=2))
+
+
 def evaluate(args, config):
     model = model_info(args.model, config)
     data = dataset_info(args.data)
     problems = read_jsonl(Path(args.data) / 'eval.jsonl')
-    image = resolve_image(args.image)
+    if len(problems) != config['eval_size'] or data['seed'] != config['data_seed']:
+        raise ValueError('Evaluation size/seed differs from configuration; prepare fresh data.')
+    scoring = scoring_protocol(config, args.image)
     generate_one, adapter = load_generator(args, config, model)
     protocol = {'model': model, 'dataset': data, 'examples': problems,
-                'prompt_version': PROMPT_VERSION, 'scorer_version': SCORER_VERSION,
-                'decoding': config['decoding'], 'scoring': config['scoring'], 'image': image,
-                'image_reference': args.image, 'versions': versions(),
-                'harness': {p.name: file_hash(p) for p in (Path(__file__), Path(__file__).with_name('evaluation_sandbox.py'))}}
+                'prompt_version': PROMPT_VERSION, 'decoding': config['decoding'],
+                'versions': versions(), 'generation_harness': file_hash(Path(__file__)), **scoring}
     result = {**provenance(), 'protocol': protocol, 'adapter': adapter,
-              'status': 'running', 'problems': []}
+              'status': 'running', 'generation_status': 'running', 'problems': []}
     write_json(args.output, result)
     for problem in problems:
         response = generate_one(problem)
         try:
             solution = extract_code(response)
-        except ValueError as exc:
+        except ValueError:
             solution = ''
-            outcome = {'passed': False, 'status': 'format_error', 'detail': str(exc), 'exit_code': None}
-        else:
-            outcome = score(solution, problem, image, config['scoring'])
-        result['problems'].append({'task_id': problem['task_id'], 'response': response,
-                                   'solution': solution, **outcome})
+        result['problems'].append({'task_id': problem['task_id'], 'response': response, 'solution': solution})
         write_json(args.output, result)
-        print(f"{problem['task_id']}: {outcome['status']}", flush=True)
-    result.update(status='complete', summary=aggregate(result['problems']),
-                  finished_at=datetime.now(timezone.utc).isoformat())
+        print(f"{problem['task_id']}: generated", flush=True)
+    result['generations_sha256'] = validate_generations(result)
+    result['generation_status'] = 'complete'
     write_json(args.output, result)
-    print(json.dumps(result['summary'], indent=2))
+    score_saved(result, args.output)
+
+
+def rescore(args, config):
+    result = read_json(args.input)
+    # Legacy completed runs can also be rescored; partial generation is never accepted.
+    if result.get('generation_status', result['status']) != 'complete':
+        raise ValueError('Rescoring requires a complete saved generation set.')
+    fingerprint = validate_generations(result)
+    result.update(provenance(), generation_status='complete', generations_sha256=fingerprint,
+                  rescored_from={'path': str(Path(args.input).resolve()), 'sha256': file_hash(args.input),
+                                 'scoring_protocol': {k: result['protocol'].get(k) for k in (
+                                     'scorer_version', 'scoring', 'image', 'image_reference', 'scoring_harness')}})
+    result['protocol'].update(scoring_protocol(config, args.image))
+    score_saved(result, args.output)
+
+
+def validate_scored(result):
+    if result['status'] != 'complete':
+        raise ValueError('Only completed evaluations can be compared.')
+    if result.get('generation_status', 'complete') != 'complete':
+        raise ValueError('Incomplete generation set.')
+    validate_generations(result)
+    protocol = result['protocol']
+    required = ('model', 'dataset', 'examples', 'prompt_version', 'decoding', 'versions',
+                'scorer_version', 'test_version', 'scoring', 'image', 'image_reference',
+                'scoring_python', 'scoring_harness')
+    if any(key not in protocol for key in required) or protocol['scorer_version'] != SCORER_VERSION:
+        raise ValueError('Incomplete or obsolete scoring protocol; rescore saved generations.')
+    if (protocol['test_version'] != TEST_VERSION or not protocol['scoring_harness'] or
+            not (protocol.get('generation_harness') or protocol.get('harness'))):
+        raise ValueError('Incomplete scoring provenance.')
+    for key in ('startup_seconds', 'wall_seconds', 'cpu_seconds', 'memory_mb'):
+        if type(protocol['scoring'].get(key)) is not int or protocol['scoring'][key] <= 0:
+            raise ValueError('Invalid scoring limits.')
+    for row in result['problems']:
+        if type(row['passed']) is not bool or row['status'] not in ('passed', 'failed', 'timeout', 'format_error'):
+            raise ValueError('Incomplete or invalid scoring outcome.')
+        if row['passed'] != (row['status'] == 'passed'):
+            raise ValueError('Scoring status and pass flag disagree.')
+        if (row['status'] == 'passed' and row['exit_code'] != 0 or
+                row['status'] == 'failed' and (type(row['exit_code']) is not int or row['exit_code'] == 0) or
+                row['status'] in ('timeout', 'format_error') and row['exit_code'] is not None or
+                (row['status'] == 'format_error') != (row['solution'] == '')):
+            raise ValueError('Invalid scoring exit code or format outcome.')
+    summary = aggregate(result['problems'])
+    if result.get('summary') != summary:
+        raise ValueError('Scoring summary differs from per-task outcomes.')
+    return summary
 
 
 def compare_results(baseline, adapted):
-    if baseline['status'] != 'complete' or adapted['status'] != 'complete':
-        raise ValueError('Only completed evaluations can be compared.')
+    b, a = validate_scored(baseline), validate_scored(adapted)
     if baseline['adapter'] is not None or adapted['adapter'] is None:
         raise ValueError('Comparison requires an adapter-free baseline and an adapted evaluation.')
     # Timestamps in data preparation are irrelevant; the actual file hashes/IDs must match.
@@ -352,15 +464,31 @@ def compare_results(baseline, adapted):
     if protocol(baseline) != protocol(adapted):
         raise ValueError('Evaluation protocols differ (model, examples, prompts, decoding, scorer, image, or libraries).')
     before, after = baseline['problems'], adapted['problems']
-    expected = [r['task_id'] for r in baseline['protocol']['examples']]
-    if [r['task_id'] for r in before] != expected or [r['task_id'] for r in after] != expected:
-        raise ValueError('Evaluated task IDs/order differ from the protocol.')
-    b, a = aggregate(before), aggregate(after)
+    transitions = {name: [] for name in ('fail_to_pass', 'pass_to_fail', 'unchanged_pass', 'unchanged_fail')}
+    for x, y in zip(before, after):
+        name = ('unchanged_pass' if x['passed'] else 'unchanged_fail') if x['passed'] == y['passed'] else (
+            'pass_to_fail' if x['passed'] else 'fail_to_pass')
+        transitions[name].append(x['task_id'])
     return {'baseline': b, 'adapted': a,
-            'difference_percentage_points': a['pass_at_1_percent'] - b['pass_at_1_percent'],
+            'transitions': {k: len(v) for k, v in transitions.items()},
+            'changed_task_ids': {k: transitions[k] for k in ('fail_to_pass', 'pass_to_fail')},
+            'net_correct_change': a['passed'] - b['passed'],
+            'interpretation': ('This single paired, test-conditioned MBPP evaluation does not prove general improvement. '
+                               'The earlier 50-task sample is a different sample; public MBPP may be present in pretraining.'),
+            'difference_percentage_points': 100 * (a['passed'] - b['passed']) / b['total'],
             'outcomes': [{'task_id': x['task_id'], 'baseline_passed': x['passed'],
                           'adapted_passed': y['passed'], 'changed': x['passed'] != y['passed']}
                          for x, y in zip(before, after)]}
+
+
+def print_comparison(report):
+    for key, label in (('baseline', 'Base'), ('adapted', 'Adapted')):
+        value = report[key]
+        print(f"{label}: {value['passed']}/{value['total']} ({value['pass_at_1_percent']:.2f}%)")
+    print(f"Difference: {report['difference_percentage_points']:+.2f} percentage points; "
+          f"net correct: {report['net_correct_change']:+d}")
+    print(json.dumps({k: report[k] for k in ('transitions', 'changed_task_ids')}, indent=2))
+    print(report['interpretation'])
 
 
 def validate_config(config):
@@ -371,7 +499,11 @@ def validate_config(config):
     for key in ('eval_size', 'validation_size'):
         if type(config[key]) is not int or config[key] <= 0:
             raise ValueError(f'{key} must be a positive integer.')
+    if config['eval_size'] > 500:
+        raise ValueError('eval_size exceeds the official 500-problem test split.')
     decoding, scoring, training = (config[k] for k in ('decoding', 'scoring', 'training'))
+    if type(scoring.get('startup_seconds', 30)) is not int or scoring.get('startup_seconds', 30) <= 0:
+        raise ValueError('startup_seconds must be a positive integer.')
     if any(type(seed) is not int for seed in (config['data_seed'], decoding['seed'], training['seed'])):
         raise ValueError('All seeds must be integers.')
     lora = training['lora_parameters']
@@ -396,7 +528,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=str(CONFIG))
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ('prepare-model', 'prepare-data', 'infer', 'train', 'evaluate', 'compare'):
+    for name in ('prepare-model', 'prepare-data', 'infer', 'train', 'evaluate', 'rescore', 'compare'):
         sub = commands.add_parser(name)
         if name in ('prepare-model', 'infer', 'train', 'evaluate'):
             sub.add_argument('--model', default='models/qwen3-4b-2507')
@@ -404,13 +536,15 @@ def main(argv=None):
             sub.add_argument('--data', default='data/mbpp')
         if name in ('infer', 'evaluate'):
             sub.add_argument('--adapter', help='Completed adapter directory; omitted means base model')
-        if name in ('infer', 'evaluate', 'compare'):
+        if name in ('infer', 'evaluate', 'rescore', 'compare'):
             sub.add_argument('--output', required=True)
         if name == 'infer':
             sub.add_argument('--task', required=True)
             sub.add_argument('--test', action='append', help='Optional task assertion; repeatable')
-        if name == 'evaluate':
+        if name in ('evaluate', 'rescore'):
             sub.add_argument('--image', default=DEFAULT_IMAGE)
+        if name == 'rescore':
+            sub.add_argument('--input', required=True, help='Saved evaluation with all generations')
         if name == 'train':
             sub.add_argument('--adapter-output', default='adapters/mbpp-lora')
             sub.add_argument('--resume-adapter', help='Resume weights from a completed adapter directory')
@@ -428,7 +562,7 @@ def main(argv=None):
             report.update(provenance(), inputs={k: {'path': str(Path(v).resolve()), 'sha256': file_hash(v)}
                                                for k, v in (('baseline', args.baseline), ('adapted', args.adapted))})
             write_json(args.output, report)
-            print(json.dumps(report, indent=2))
+            print_comparison(report)
         else:
             globals()[args.command.replace('-', '_')](args, config)
     except (ValueError, TypeError, OSError, KeyError, ImportError, subprocess.SubprocessError) as exc:
