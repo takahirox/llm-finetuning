@@ -71,8 +71,19 @@ def score(solution, problem, image, settings):
         return {'passed': False, 'status': 'timeout', 'exit_code': None}
     finally:
         # Killing the Docker CLI alone does not stop the container.
+        cleanup_error = (f'Could not clean up evaluation container {name}; '
+                         f'run docker rm -f {name} and confirm removal before continuing.')
         try:
-            subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+            removal = subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, timeout=15, check=False)
+            if removal.returncode != 0:
+                # --rm may already have removed it. A failed inspect cannot
+                # distinguish absence from a daemon error; a successful listing can.
+                remaining = subprocess.run(
+                    ['docker', 'container', 'ls', '--all', '--quiet', '--filter', f'name=^/{name}$'],
+                    capture_output=True, text=True, timeout=15, check=False,
+                )
+                if remaining.returncode != 0 or remaining.stdout.strip():
+                    raise ValueError(cleanup_error)
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ValueError(f'Could not clean up evaluation container {name}; stop it before continuing.') from exc
+            raise ValueError(cleanup_error) from exc

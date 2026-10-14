@@ -208,6 +208,30 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(sandbox.score('while True: pass', row(11), 'image', self.settings)['status'], 'timeout')
             self.assertEqual(run.call_count, 2)
 
+    def test_failed_removal_tolerates_confirmed_absent_container(self):
+        for execution in (SimpleNamespace(returncode=0), subprocess.TimeoutExpired('docker', 5)):
+            with self.subTest(execution=execution), patch.object(sandbox.subprocess, 'run') as run:
+                run.side_effect = [execution, SimpleNamespace(returncode=1),
+                                   SimpleNamespace(returncode=0, stdout='')]
+                outcome = sandbox.score('pass', row(11), 'image', self.settings)
+                self.assertEqual(outcome['status'], 'timeout' if isinstance(execution, Exception) else 'passed')
+                self.assertEqual(run.call_count, 3)
+                name = run.call_args_list[1].args[0][-1]
+                self.assertEqual(run.call_args.args[0],
+                                 ['docker', 'container', 'ls', '--all', '--quiet', '--filter', f'name=^/{name}$'])
+                self.assertEqual(run.call_args.kwargs['timeout'], 15)
+
+    def test_failed_removal_aborts_if_container_remains_or_absence_is_unconfirmed(self):
+        checks = (SimpleNamespace(returncode=0, stdout='container-id\n'),
+                  SimpleNamespace(returncode=1, stdout=''),
+                  subprocess.TimeoutExpired('docker', 15), OSError('Docker unavailable'))
+        for execution in (SimpleNamespace(returncode=0), subprocess.TimeoutExpired('docker', 5)):
+            for check in checks:
+                with self.subTest(execution=execution, check=check), patch.object(sandbox.subprocess, 'run') as run:
+                    run.side_effect = [execution, SimpleNamespace(returncode=1), check]
+                    with self.assertRaisesRegex(ValueError, 'clean up.*docker rm -f mbpp-'):
+                        sandbox.score('pass', row(11), 'image', self.settings)
+
     def test_missing_docker_and_cleanup_error_abort(self):
         with patch.object(sandbox.subprocess, 'run', side_effect=FileNotFoundError):
             with self.assertRaisesRegex(ValueError, 'Docker/image unavailable'):
