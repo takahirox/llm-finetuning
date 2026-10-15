@@ -188,7 +188,7 @@ class AdapterTests(unittest.TestCase):
                                    adapter_output=str(output))
 
             def train(command, **kwargs):
-                self.assertEqual(command[1:4], ['-m', 'mlx_lm', 'lora'])
+                self.assertEqual(command[1:5], ['-m', 'scripts.masked_lora', '--mask-variant', 'corrected'])
                 actual = exp.read_json(command[-1])
                 self.assertTrue(actual['train'])
                 self.assertFalse(actual['test'])
@@ -196,10 +196,16 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual(actual['data'], str(Path('data/mbpp').resolve()))
                 (output / 'adapters.safetensors').write_bytes(b'fixture')
                 exp.write_json(output / 'adapter_config.json', actual)
+                exp.write_json(output / 'trainer_runtime.json', {
+                    'status': 'complete', 'integration': {'variant': 'corrected'}, 'versions': exp.versions(),
+                    'configuration_sha256': exp.digest(actual), 'trainer_calls': 1,
+                    'train_batches': 100, 'validation_batches': 4})
                 return SimpleNamespace(returncode=0)
 
             with patch.object(exp, 'require_mlx'), patch.object(exp, 'model_info', return_value={'revision': 'base'}), \
-                 patch.object(exp, 'dataset_info', return_value={'ids': {'train': [601]}}), \
+                 patch('scripts.loss_masking.integration_info', return_value={'variant': 'corrected'}), \
+                 patch.object(exp, 'code_state', return_value={'revision': 'fixture'}), \
+                 patch.object(exp, 'dataset_info', return_value={'seed': 42, 'ids': {'train': [601], 'valid': list(range(602, 622))}}), \
                  patch.object(exp.subprocess, 'run', side_effect=train):
                 exp.train(args, config)
             info = exp.adapter_info(output, {'revision': 'base'})
