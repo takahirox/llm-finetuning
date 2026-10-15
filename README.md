@@ -5,6 +5,13 @@ experiment on Apple Silicon: generate with Qwen, measure a held-out MBPP baselin
 train a LoRA adapter, and compare the adapted model on exactly the same problems.
 Improvement is an experimental question, not a guaranteed outcome.
 
+For new training development, use the [controlled padding-loss experiment](docs/padding-loss-experiment.md):
+two fresh 100-step adapters, a deterministic 294/80 internal split, validation
+pass@1, and a provenance-checked legacy-versus-corrected comparison. Corrected
+completion-only loss is now the training default. The workflow below retains the
+historical 354/20 configuration for reproducibility; its official-test evaluations
+are diagnostic evidence and must not become a repeated model-selection loop.
+
 ## Supported environment
 
 - Apple Silicon Mac with native **arm64** Python and a terminal running without Rosetta.
@@ -167,6 +174,7 @@ Outputs in `data/mbpp/`:
 
 - `train.jsonl`, `valid.jsonl`: MLX-LM chat examples from training IDs only.
 - `eval.jsonl`: held-out task descriptions, assertions, and setup code; no reference solutions.
+- `validation_eval.jsonl`: reference-free scoring prompts for the internal validation IDs.
 - `manifest.json`: source/checksum, exact ordered split IDs, seed, file hashes, and versions.
 
 This is **test-conditioned MBPP**: the task's three standard assertions appear in
@@ -235,8 +243,12 @@ reference are recorded and checked during comparison.
   --adapter-output adapters/mbpp-lora
 ```
 
-The wrapper invokes the installed MLX-LM LoRA trainer using only `train.jsonl`
-and `valid.jsonl`. Defaults: seed 42, Adam learning rate `1e-5`, 100 optimizer
+The wrapper invokes the pinned MLX-LM LoRA trainer through a project-owned loss
+hook using only `train.jsonl` and `valid.jsonl`. Padding and prompt tokens are
+excluded by position; real completion/EOS tokens retain loss. No installed package
+files are patched. `--mask-variant legacy` is an explicit diagnostic option for the
+[controlled experiment](docs/padding-loss-experiment.md), which explains the
+upstream off-by-one error. Defaults: seed 42, Adam learning rate `1e-5`, 100 optimizer
 iterations (not epochs), batch size 1, last 8 transformer layers, rank 8, scale 20,
 dropout 0, attention `q_proj`/`v_proj` targets, 1024-token sequence limit, gradient
 checkpointing, and masked prompt loss. Four validation batches run every 25 steps;
@@ -245,8 +257,10 @@ truncated at the sequence limit. The checked-in config makes these choices expli
 
 Outputs: `adapters/mbpp-lora/adapters.safetensors`, periodic checkpoints,
 `adapter_config.json`, `training_config.json`, `training.log`, and
-`experiment_training.json` (model/data/configuration, versions, timestamps,
-completion status, adapter hashes). Base weights are preserved. Inspect the log
+`experiment_training.json` (model/data/configuration, mask variant, code/dependency
+versions, timestamps, completion status, adapter hashes), and `trainer_runtime.json`
+(verified loss-hook execution and tokenization audit). Fully truncated completions
+fail explicitly. Base weights are preserved. Inspect the log
 for progress/failures. Inference/evaluation accepts only completed, matching adapters.
 
 To continue from saved adapter weights into a new directory:
@@ -306,6 +320,7 @@ uv sync --locked
 uv pip check
 .venv/bin/python scripts/check_environment.py
 .venv/bin/python -m unittest discover -s tests -v
+RUN_MLX_TESTS=1 .venv/bin/python -m unittest discover -s tests -p test_loss_masking.py -v
 .venv/bin/python -m compileall -q scripts tests
 git diff --check
 ```
@@ -313,7 +328,11 @@ git diff --check
 Unit tests use small fixtures/mocks and need neither MLX imports nor Docker.
 They cover split separation, data/model/adapter integrity, prompts, formatting,
 base/adapter selection, trainer invocation, scoring errors/timeouts, and comparison.
-See [implementation validation](docs/experiment-validation.md) for measured checks
+The separately enabled native mask tests require the supported MLX environment;
+they exercise token-level masks/gradients and a tiny one-step LoRA model, without
+downloading Qwen weights or running MBPP scoring.
+See [original implementation validation](docs/experiment-validation.md) and
+[padding-loss validation](docs/padding-loss-validation.md) for measured checks
 and unperformed model experiments. No 4B benchmark score or learning improvement
 is claimed by this implementation. No post-merge verification is required.
 

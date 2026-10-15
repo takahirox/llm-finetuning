@@ -65,6 +65,13 @@ def provenance():
     return {'created_at': datetime.now(timezone.utc).isoformat(), 'versions': versions()}
 
 
+def code_state():
+    return {'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            'files': {str(p.relative_to(ROOT)): file_hash(p) for p in sorted((ROOT / 'scripts').glob('*.py'))},
+            'lock_sha256': file_hash(ROOT / 'uv.lock'),
+            'project_sha256': file_hash(ROOT / 'pyproject.toml')}
+
+
 def require_mlx():
     if platform.system() != 'Darwin' or platform.machine() != 'arm64' or sys.version_info[:2] != (3, 12):
         raise ValueError('MLX stages require native Apple Silicon macOS and Python 3.12; run scripts/check_environment.py.')
@@ -148,13 +155,17 @@ def prepare_data(args, config):
     # Reference solutions and challenge tests are deliberately absent from evaluation files.
     write_jsonl(path / 'eval.jsonl', [{k: r[k] for k in ('task_id', 'text', 'test_list', 'test_setup_code')}
                                     for r in groups[2]])
+    write_jsonl(path / 'validation_eval.jsonl', [
+        {k: r[k] for k in ('task_id', 'text', 'test_list', 'test_setup_code')} for r in groups[1]])
     write_json(path / 'manifest.json', {
         **provenance(), 'source': DATA_URL, 'source_sha256': DATA_SHA256,
         'source_revision': DATA_REVISION, 'eval_size': config['eval_size'],
         'seed': config['data_seed'], 'prompt_version': PROMPT_VERSION, 'test_version': TEST_VERSION,
         'ids': {name: [r['task_id'] for r in rows]
                 for name, rows in zip(('train', 'valid', 'eval'), groups)},
-        'files': {name: file_hash(path / name) for name in ('train.jsonl', 'valid.jsonl', 'eval.jsonl')},
+        'split_sha256': digest([[r['task_id'] for r in rows] for rows in groups]),
+        'files': {name: file_hash(path / name) for name in (
+            'train.jsonl', 'valid.jsonl', 'eval.jsonl', 'validation_eval.jsonl')},
     })
     print(f'Prepared train/validation/evaluation counts: {[len(rows) for rows in groups]} in {path}')
 
@@ -189,6 +200,17 @@ def dataset_info(path):
     for name in ('train.jsonl', 'valid.jsonl', 'eval.jsonl'):
         if file_hash(path / name) != manifest['files'][name]:
             raise ValueError(f'Dataset changed: {name}; prepare a fresh dataset.')
+    if 'validation_eval.jsonl' in manifest['files']:
+        validation = read_jsonl(path / 'validation_eval.jsonl')
+        if (file_hash(path / 'validation_eval.jsonl') != manifest['files']['validation_eval.jsonl'] or
+                [r['task_id'] for r in validation] != ids['valid'] or
+                any(set(r) != {'task_id', 'text', 'test_list', 'test_setup_code'} or not r['test_list'] for r in validation)):
+            raise ValueError('Validation prompts changed or contain unexpected reference fields.')
+        valid_chat = read_jsonl(path / 'valid.jsonl')
+        if any(chat['messages'][:-1] != messages(problem) for chat, problem in zip(valid_chat, validation)):
+            raise ValueError('Validation scoring prompts differ from the loss-validation prompts.')
+    if 'split_sha256' in manifest and manifest['split_sha256'] != digest([ids[k] for k in ('train', 'valid', 'eval')]):
+        raise ValueError('Split ID checksum mismatch.')
     return manifest
 
 
@@ -278,9 +300,14 @@ def infer(args, config):
 
 
 def train(args, config):
+    from scripts.loss_masking import integration_info
     require_mlx()
+    variant = getattr(args, 'mask_variant', 'corrected')
+    integration = integration_info(variant)
     model = model_info(args.model, config)
     data = dataset_info(args.data)
+    if data['seed'] != config['data_seed'] or len(data['ids']['valid']) != config['validation_size']:
+        raise ValueError('Training split size/seed differs from configuration; prepare fresh data.')
     resume = adapter_info(args.resume_adapter, model)
     path = Path(args.adapter_output)
     training = dict(config['training'], model=str(Path(args.model).resolve()), train=True,
@@ -294,15 +321,27 @@ def train(args, config):
     # JSON is a YAML subset accepted by MLX-LM; config captures every experiment parameter.
     write_json(path / 'training_config.json', training)
     metadata = {**provenance(), 'model': model, 'dataset': data, 'configuration': training,
-                'resume': resume, 'status': 'running'}
+                'loss_mask': integration, 'code': code_state(), 'resume': resume, 'status': 'running'}
     write_json(path / 'experiment_training.json', metadata)
     with (path / 'training.log').open('w') as log:
-        result = subprocess.run([sys.executable, '-m', 'mlx_lm', 'lora', '--config',
+        result = subprocess.run([sys.executable, '-m', 'scripts.masked_lora', '--mask-variant', variant, '--config',
                                  str(path / 'training_config.json')], stdout=log, stderr=subprocess.STDOUT)
     metadata['finished_at'] = datetime.now(timezone.utc).isoformat()
     metadata['status'] = 'complete' if result.returncode == 0 else 'failed'
     if result.returncode == 0:
-        metadata['adapter_files'] = {n: file_hash(path / n) for n in ('adapters.safetensors', 'adapter_config.json')}
+        try:
+            runtime = read_json(path / 'trainer_runtime.json')
+            if (runtime['status'] != 'complete' or runtime['integration'] != integration or
+                    runtime['versions'] != metadata['versions'] or runtime['configuration_sha256'] != digest(training) or
+                    runtime['trainer_calls'] != 1 or not runtime['train_batches'] or not runtime['validation_batches']):
+                raise ValueError('Inconsistent trainer runtime evidence.')
+            metadata['runtime'] = runtime
+            metadata['adapter_files'] = {n: file_hash(path / n) for n in (
+                'adapters.safetensors', 'adapter_config.json', 'training_config.json', 'trainer_runtime.json')}
+        except (ValueError, KeyError, OSError) as exc:
+            metadata['status'] = 'failed'
+            write_json(path / 'experiment_training.json', metadata)
+            raise ValueError('Missing or inconsistent trainer runtime evidence/adapter files; training rejected.') from exc
     write_json(path / 'experiment_training.json', metadata)
     if result.returncode:
         raise ValueError(f'Training failed; inspect {path / "training.log"}.')
@@ -378,12 +417,18 @@ def score_saved(result, output):
 def evaluate(args, config):
     model = model_info(args.model, config)
     data = dataset_info(args.data)
-    problems = read_jsonl(Path(args.data) / 'eval.jsonl')
-    if len(problems) != config['eval_size'] or data['seed'] != config['data_seed']:
+    split = getattr(args, 'split', 'test')
+    filename = 'validation_eval.jsonl' if split == 'validation' else 'eval.jsonl'
+    if split == 'validation' and filename not in data['files']:
+        raise ValueError('Validation scoring prompts missing; prepare fresh data in a new directory.')
+    problems = read_jsonl(Path(args.data) / filename)
+    expected_size = config['validation_size'] if split == 'validation' else config['eval_size']
+    if len(problems) != expected_size or data['seed'] != config['data_seed']:
         raise ValueError('Evaluation size/seed differs from configuration; prepare fresh data.')
     scoring = scoring_protocol(config, args.image)
     generate_one, adapter = load_generator(args, config, model)
     protocol = {'model': model, 'dataset': data, 'examples': problems,
+                'split': split,
                 'prompt_version': PROMPT_VERSION, 'decoding': config['decoding'],
                 'versions': versions(), 'generation_harness': file_hash(Path(__file__)), **scoring}
     result = {**provenance(), 'protocol': protocol, 'adapter': adapter,
@@ -452,9 +497,67 @@ def validate_scored(result):
     return summary
 
 
-def compare_results(baseline, adapted):
+def stable_dataset(dataset):
+    return {k: v for k, v in dataset.items() if k not in ('created_at', 'versions')}
+
+
+def validate_mask_pair(legacy, corrected):
+    from scripts.loss_masking import UPSTREAM_HASHES
+    records = []
+    for result, variant in ((legacy, 'legacy'), (corrected, 'corrected')):
+        adapter = result.get('adapter')
+        if not adapter or 'training' not in adapter:
+            raise ValueError('Mask comparison requires two freshly trained adapters with provenance.')
+        training = adapter['training']
+        runtime = training.get('runtime', {})
+        integration = training.get('loss_mask', {})
+        protocol = result['protocol']
+        dataset = training['dataset']
+        if (training['status'] != 'complete' or training.get('resume') is not None or
+                integration.get('variant') != variant or integration.get('upstream_files') != UPSTREAM_HASHES or
+                integration.get('implementation') != 'exclusive-target-bound-v1' or
+                runtime.get('status') != 'complete' or runtime.get('integration') != integration or
+                runtime.get('versions') != training['versions'] or runtime.get('trainer_calls') != 1 or
+                not runtime.get('train_batches') or not runtime.get('validation_batches') or
+                runtime.get('configuration_sha256') != digest(training['configuration'])):
+            raise ValueError('Missing or inconsistent mask variant/trainer runtime provenance.')
+        if (protocol.get('split') != 'validation' or len(dataset['ids']['valid']) < 80 or
+                [r['task_id'] for r in protocol['examples']] != dataset['ids']['valid'] or
+                stable_dataset(dataset) != stable_dataset(protocol['dataset']) or
+                training['model'] != protocol['model'] or training['versions'] != protocol['versions']):
+            raise ValueError('Mask comparison requires the same enlarged internal validation data/model/versions used in training.')
+        ids = dataset['ids']
+        if (set(ids['train']) & set(ids['valid']) or
+                set(ids['train'] + ids['valid']) != set(range(601, 975)) or
+                any(not 11 <= i <= 510 for i in ids['eval']) or
+                dataset.get('split_sha256') != digest([ids[k] for k in ('train', 'valid', 'eval')])):
+            raise ValueError('Invalid controlled split IDs/checksum.')
+        config = dict(training['configuration'])
+        if config['iters'] != 100 or config.get('mask_prompt') is not True:
+            raise ValueError('Controlled mask comparison requires 100-step prompt-masked training.')
+        for key in ('model', 'data', 'adapter_path', 'resume_adapter_file'):
+            config.pop(key, None)
+        code = training['code']
+        if (integration['hook_sha256'] != code['files']['scripts/loss_masking.py'] or
+                integration['runner_sha256'] != code['files']['scripts/masked_lora.py']):
+            raise ValueError('Mask integration differs from recorded training code.')
+        effective = dict(runtime['effective_configuration'])
+        for key in ('model', 'data', 'adapter_path', 'resume_adapter_file'):
+            effective.pop(key, None)
+        records.append({'configuration': config, 'effective_configuration': effective,
+                        'model': training['model'], 'dataset': stable_dataset(dataset),
+                        'versions': training['versions'], 'code': code,
+                        'integration': {k: v for k, v in integration.items() if k != 'variant'},
+                        'tokenization': {k: runtime[k] for k in ('train', 'valid', 'tokenizer')}})
+    if records[0] != records[1]:
+        raise ValueError('A/B training provenance differs beyond the loss-mask variant/output paths.')
+
+
+def compare_results(baseline, adapted, *, mask_ab=False):
     b, a = validate_scored(baseline), validate_scored(adapted)
-    if baseline['adapter'] is not None or adapted['adapter'] is None:
+    if mask_ab:
+        validate_mask_pair(baseline, adapted)
+    elif baseline['adapter'] is not None or adapted['adapter'] is None:
         raise ValueError('Comparison requires an adapter-free baseline and an adapted evaluation.')
     # Timestamps in data preparation are irrelevant; the actual file hashes/IDs must match.
     def protocol(result):
@@ -470,10 +573,16 @@ def compare_results(baseline, adapted):
             'pass_to_fail' if x['passed'] else 'fail_to_pass')
         transitions[name].append(x['task_id'])
     return {'baseline': b, 'adapted': a,
+            'comparison': 'legacy-to-corrected-mask' if mask_ab else 'base-to-adapter',
+            'failure_categories': {name: {status: sum(r['status'] == status for r in result['problems'])
+                                         for status in ('failed', 'timeout', 'format_error')}
+                                   for name, result in (('baseline', baseline), ('adapted', adapted))},
             'transitions': {k: len(v) for k, v in transitions.items()},
             'changed_task_ids': {k: transitions[k] for k in ('fail_to_pass', 'pass_to_fail')},
             'net_correct_change': a['passed'] - b['passed'],
-            'interpretation': ('This single paired, test-conditioned MBPP evaluation does not prove general improvement. '
+            'interpretation': ('This mask-only comparison measures the effect on this internal validation split; '
+                               'it does not establish generalization or explain the historical test regression.' if mask_ab else
+                              'This single paired, test-conditioned MBPP evaluation does not prove general improvement. '
                                'The earlier 50-task sample is a different sample; public MBPP may be present in pretraining.'),
             'difference_percentage_points': 100 * (a['passed'] - b['passed']) / b['total'],
             'outcomes': [{'task_id': x['task_id'], 'baseline_passed': x['passed'],
@@ -482,12 +591,15 @@ def compare_results(baseline, adapted):
 
 
 def print_comparison(report):
-    for key, label in (('baseline', 'Base'), ('adapted', 'Adapted')):
+    labels = (('baseline', 'Legacy mask'), ('adapted', 'Corrected mask')) if report.get('comparison') == 'legacy-to-corrected-mask' else (
+        ('baseline', 'Base'), ('adapted', 'Adapted'))
+    for key, label in labels:
         value = report[key]
         print(f"{label}: {value['passed']}/{value['total']} ({value['pass_at_1_percent']:.2f}%)")
     print(f"Difference: {report['difference_percentage_points']:+.2f} percentage points; "
           f"net correct: {report['net_correct_change']:+d}")
     print(json.dumps({k: report[k] for k in ('transitions', 'changed_task_ids')}, indent=2))
+    print(json.dumps(report['failure_categories'], indent=2))
     print(report['interpretation'])
 
 
@@ -520,6 +632,8 @@ def validate_config(config):
         raise ValueError('Invalid temperature or top_p.')
     if training['fine_tune_type'] != 'lora' or training.get('trust_remote_code', False):
         raise ValueError('Only LoRA without remote code is supported.')
+    if training.get('mask_prompt') is not True:
+        raise ValueError('Completion-only training requires mask_prompt=true.')
     if not math.isfinite(training['learning_rate']) or training['learning_rate'] <= 0:
         raise ValueError('learning_rate must be positive and finite.')
 
@@ -528,7 +642,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=str(CONFIG))
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ('prepare-model', 'prepare-data', 'infer', 'train', 'evaluate', 'rescore', 'compare'):
+    for name in ('prepare-model', 'prepare-data', 'infer', 'train', 'evaluate', 'rescore', 'compare', 'compare-masks'):
         sub = commands.add_parser(name)
         if name in ('prepare-model', 'infer', 'train', 'evaluate'):
             sub.add_argument('--model', default='models/qwen3-4b-2507')
@@ -536,29 +650,39 @@ def main(argv=None):
             sub.add_argument('--data', default='data/mbpp')
         if name in ('infer', 'evaluate'):
             sub.add_argument('--adapter', help='Completed adapter directory; omitted means base model')
-        if name in ('infer', 'evaluate', 'rescore', 'compare'):
+        if name in ('infer', 'evaluate', 'rescore', 'compare', 'compare-masks'):
             sub.add_argument('--output', required=True)
         if name == 'infer':
             sub.add_argument('--task', required=True)
             sub.add_argument('--test', action='append', help='Optional task assertion; repeatable')
         if name in ('evaluate', 'rescore'):
             sub.add_argument('--image', default=DEFAULT_IMAGE)
+        if name == 'evaluate':
+            sub.add_argument('--split', choices=('test', 'validation'), default='test')
         if name == 'rescore':
             sub.add_argument('--input', required=True, help='Saved evaluation with all generations')
         if name == 'train':
+            sub.add_argument('--mask-variant', choices=('corrected', 'legacy'), default='corrected',
+                             help='legacy is diagnostic only; normal training uses corrected masking')
             sub.add_argument('--adapter-output', default='adapters/mbpp-lora')
             sub.add_argument('--resume-adapter', help='Resume weights from a completed adapter directory')
         if name == 'compare':
             sub.add_argument('--baseline', required=True)
             sub.add_argument('--adapted', required=True)
+        if name == 'compare-masks':
+            sub.add_argument('--legacy', required=True)
+            sub.add_argument('--corrected', required=True)
     args = parser.parse_args(argv)
     try:
         if getattr(args, 'output', None) and Path(args.output).exists():
             raise ValueError(f'{args.output} exists; select a new --output path.')
         config = read_json(args.config)
         validate_config(config)
-        if args.command == 'compare':
-            report = compare_results(read_json(args.baseline), read_json(args.adapted))
+        if args.command in ('compare', 'compare-masks'):
+            if args.command == 'compare-masks':
+                args.baseline, args.adapted = args.legacy, args.corrected
+            report = compare_results(read_json(args.baseline), read_json(args.adapted),
+                                     mask_ab=args.command == 'compare-masks')
             report.update(provenance(), inputs={k: {'path': str(Path(v).resolve()), 'sha256': file_hash(v)}
                                                for k, v in (('baseline', args.baseline), ('adapted', args.adapted))})
             write_json(args.output, report)
