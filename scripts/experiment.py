@@ -97,6 +97,9 @@ def fresh_directory(path):
 
 
 def messages(problem):
+    if problem.get('prompt_style') == 'python-task-hidden-tests-v1':
+        return [{'role': 'user', 'content': 'Write a complete Python solution. Return only Python code, '
+                 'without Markdown fences or explanation.\n\n' + problem['text'].strip()}]
     return [{'role': 'user', 'content': (
         'Write a complete Python solution to the task below. Return only Python code, '
         'without Markdown fences or explanation. Use the function names in these assertions.\n\n'
@@ -173,6 +176,9 @@ def prepare_data(args, config):
 def dataset_info(path):
     path = Path(path)
     manifest = read_json(path / 'manifest.json')
+    if manifest.get('kind') == 'kodcode-study-v1':
+        from scripts.data_study import dataset_info as study_dataset_info
+        return study_dataset_info(path)
     if manifest['prompt_version'] != PROMPT_VERSION:
         raise ValueError('Dataset prompt version differs; prepare a fresh dataset.')
     if manifest['source'] != DATA_URL or manifest['source_sha256'] != DATA_SHA256:
@@ -266,6 +272,11 @@ def adapter_info(path, model):
     for name, expected in info['adapter_files'].items():
         if file_hash(path / name) != expected:
             raise ValueError(f'Adapter changed: {name}.')
+    if info.get('dataset', {}).get('kind') == 'kodcode-study-v1':
+        if (read_json(path / 'training_config.json') != info['configuration'] or
+                read_json(path / 'trainer_runtime.json') != info['runtime'] or
+                digest(read_jsonl(path / 'exposure.jsonl')) != info['runtime']['exposure']['order_sha256']):
+            raise ValueError('Adapter study metadata differs from saved runtime/configuration/trace.')
     return {'path': str(path.resolve()), 'files': info['adapter_files'],
             'training': info}
 
@@ -306,6 +317,11 @@ def train(args, config):
     integration = integration_info(variant)
     model = model_info(args.model, config)
     data = dataset_info(args.data)
+    is_study = data.get('kind') == 'kodcode-study-v1'
+    if is_study:
+        from scripts.data_study import local_artifact, training_settings
+        local_artifact(args.adapter_output)
+        config = dict(config, training=training_settings(config, data, args))
     if data['seed'] != config['data_seed'] or len(data['ids']['valid']) != config['validation_size']:
         raise ValueError('Training split size/seed differs from configuration; prepare fresh data.')
     resume = adapter_info(args.resume_adapter, model)
@@ -336,8 +352,16 @@ def train(args, config):
                     runtime['trainer_calls'] != 1 or not runtime['train_batches'] or not runtime['validation_batches']):
                 raise ValueError('Inconsistent trainer runtime evidence.')
             metadata['runtime'] = runtime
+            if is_study:
+                from scripts.data_study import validate_exposure
+                validate_exposure(runtime, training)
             metadata['adapter_files'] = {n: file_hash(path / n) for n in (
                 'adapters.safetensors', 'adapter_config.json', 'training_config.json', 'trainer_runtime.json')}
+            if is_study:
+                trace = read_jsonl(path / 'exposure.jsonl')
+                if digest(trace) != runtime['exposure']['order_sha256']:
+                    raise ValueError('Exposure order trace differs from runtime evidence.')
+                metadata['adapter_files']['exposure.jsonl'] = file_hash(path / 'exposure.jsonl')
         except (ValueError, KeyError, OSError) as exc:
             metadata['status'] = 'failed'
             write_json(path / 'experiment_training.json', metadata)
@@ -415,6 +439,8 @@ def score_saved(result, output):
 
 
 def evaluate(args, config):
+    if (Path(args.data) / 'study.json').is_file():
+        return evaluate_study(args, config)
     model = model_info(args.model, config)
     data = dataset_info(args.data)
     split = getattr(args, 'split', 'test')
@@ -447,6 +473,67 @@ def evaluate(args, config):
     result['generation_status'] = 'complete'
     write_json(args.output, result)
     score_saved(result, args.output)
+
+
+def evaluate_study(args, config):
+    from scripts.data_study import study_info, local_artifact, confirmation_access, PROMPT
+    study = study_info(args.data)
+    local_artifact(args.output)
+    split = args.split
+    if split not in ('development', 'confirmation'):
+        raise ValueError('Use development or confirmation for external data studies.')
+    if split == 'development' and (Path(args.data) / 'confirmation-access').exists():
+        raise ValueError('Confirmation has started; development selection is closed.')
+    expected = study['configuration']
+    if any(config[k] != expected[k] for k in ('model_id', 'model_revision', 'dtype', 'decoding', 'scoring')):
+        raise ValueError('Evaluation settings differ from the frozen study.')
+    model = model_info(args.model, config)
+    scoring = scoring_protocol(config, args.image)
+    generate_one, adapter = load_generator(args, config, model)
+    if adapter is not None:
+        validate_study_training(adapter['training'], study['study_sha256'], model)
+    choice = None
+    if split == 'confirmation':
+        choice = confirmation_access(args.data, study, config, adapter, model)
+        frozen = read_json(Path(args.data) / 'choice.json')['protocol']
+        if any(scoring[k] != frozen[k] for k in scoring) or versions() != frozen['versions']:
+            raise ValueError('Confirmation scorer/libraries differ from development.')
+    problems = read_jsonl(Path(args.data) / f'{split}.jsonl')
+    protocol = {'model': model, 'dataset': {'kind': study['kind'], 'study_sha256': study['study_sha256']},
+                'study_sha256': study['study_sha256'], 'examples': problems, 'split': split,
+                'choice_sha256': choice, 'prompt_version': PROMPT, 'decoding': config['decoding'],
+                'versions': versions(), 'generation_harness': file_hash(Path(__file__)), **scoring}
+    result = {**provenance(), 'protocol': protocol, 'adapter': adapter,
+              'status': 'running', 'generation_status': 'running', 'problems': []}
+    write_json(args.output, result)
+    for problem in problems:
+        response = generate_one(problem)
+        try:
+            solution = extract_code(response)
+        except ValueError:
+            solution = ''
+        result['problems'].append({'task_id': problem['task_id'], 'response': response, 'solution': solution})
+        write_json(args.output, result)
+    result['generations_sha256'] = validate_generations(result)
+    result['generation_status'] = 'complete'
+    write_json(args.output, result)
+    score_saved(result, args.output)
+
+
+def validate_study_training(training, study_hash, model):
+    from scripts.data_study import validate_exposure
+    runtime, configuration = training['runtime'], training['configuration']
+    from scripts.loss_masking import UPSTREAM_HASHES
+    if (training['status'] != 'complete' or training['model'] != model or training['resume'] is not None or
+            training['dataset'].get('study_sha256') != study_hash or
+            configuration['study_exposure']['study_sha256'] != study_hash or
+            configuration['study_exposure']['sample_ids'] != training['dataset']['ids']['train'] or
+            training['loss_mask']['variant'] != 'corrected' or runtime['status'] != 'complete' or
+            training['loss_mask']['upstream_files'] != UPSTREAM_HASHES or
+            runtime['integration'] != training['loss_mask'] or runtime['versions'] != training['versions'] or
+            runtime['configuration_sha256'] != digest(configuration) or runtime['trainer_calls'] != 1):
+        raise ValueError('Invalid controlled training provenance.')
+    validate_exposure(runtime, configuration)
 
 
 def rescore(args, config):
@@ -566,13 +653,16 @@ def compare_results(baseline, adapted, *, mask_ab=False):
         return value
     if protocol(baseline) != protocol(adapted):
         raise ValueError('Evaluation protocols differ (model, examples, prompts, decoding, scorer, image, or libraries).')
+    study = baseline['protocol'].get('study_sha256')
+    if study:
+        validate_study_training(adapted['adapter']['training'], study, baseline['protocol']['model'])
     before, after = baseline['problems'], adapted['problems']
     transitions = {name: [] for name in ('fail_to_pass', 'pass_to_fail', 'unchanged_pass', 'unchanged_fail')}
     for x, y in zip(before, after):
         name = ('unchanged_pass' if x['passed'] else 'unchanged_fail') if x['passed'] == y['passed'] else (
             'pass_to_fail' if x['passed'] else 'fail_to_pass')
         transitions[name].append(x['task_id'])
-    return {'baseline': b, 'adapted': a,
+    report = {'baseline': b, 'adapted': a,
             'comparison': 'legacy-to-corrected-mask' if mask_ab else 'base-to-adapter',
             'failure_categories': {name: {status: sum(r['status'] == status for r in result['problems'])
                                          for status in ('failed', 'timeout', 'format_error')}
@@ -588,6 +678,23 @@ def compare_results(baseline, adapted, *, mask_ab=False):
             'outcomes': [{'task_id': x['task_id'], 'baseline_passed': x['passed'],
                           'adapted_passed': y['passed'], 'changed': x['passed'] != y['passed']}
                          for x, y in zip(before, after)]}
+    if study:
+        training = adapted['adapter']['training']
+        report.update(selection=training['dataset']['selection'], exposure=training['runtime']['exposure'],
+                      training_seed=training['configuration']['seed'],
+                      corpus=training['dataset']['diagnostics'],
+                      interpretation='Report size and same-size quality contrasts separately. Fixed epochs '
+                      'use different compute; fixed steps may not cover the pool. These public synthetic '
+                      'holdouts do not establish general improvement; semantic/pretraining overlap and '
+                      'multiple comparisons remain. Confirmation must follow a frozen development choice.')
+        # Paired normal interval, explicitly descriptive and unadjusted for multiple comparisons.
+        changes = [int(y['passed']) - int(x['passed']) for x, y in zip(before, after)]
+        n = len(changes)
+        mean = sum(changes) / n
+        se = math.sqrt(sum((v - mean) ** 2 for v in changes) / (n * (n - 1))) if n > 1 else None
+        report['paired_delta_95_percent_normal_interval_pp'] = (
+            [max(-100, 100 * (mean - 1.96 * se)), min(100, 100 * (mean + 1.96 * se))] if se is not None else None)
+    return report
 
 
 def print_comparison(report):
@@ -658,7 +765,7 @@ def main(argv=None):
         if name in ('evaluate', 'rescore'):
             sub.add_argument('--image', default=DEFAULT_IMAGE)
         if name == 'evaluate':
-            sub.add_argument('--split', choices=('test', 'validation'), default='test')
+            sub.add_argument('--split', choices=('test', 'validation', 'development', 'confirmation'), default='test')
         if name == 'rescore':
             sub.add_argument('--input', required=True, help='Saved evaluation with all generations')
         if name == 'train':
