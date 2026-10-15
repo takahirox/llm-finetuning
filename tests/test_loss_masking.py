@@ -157,6 +157,17 @@ class NativeMaskTests(unittest.TestCase):
                 self.assertIs(lora.train, original_train)
                 weights.append(mx.load(str(output / 'adapters.safetensors')))
             self.assertTrue(any(not mx.array_equal(weights[0][k], weights[1][k]).item() for k in weights[0]))
+            # Real trainer batches must expose both examples exactly once for a study epoch.
+            config.update(adapter_path=str(root / 'exposure'), batch_size=1, iters=2,
+                          study_exposure={'policy': 'fixed-epochs', 'epochs': 1, 'sample_ids': ['a', 'b']})
+            with patch.object(lora, 'load', return_value=(TinyModel(), Tokenizer())):
+                masked_lora.run(config, 'corrected')
+            runtime = exp.read_json(root / 'exposure/trainer_runtime.json')
+            from scripts.data_study import validate_exposure
+            validate_exposure(runtime, config)
+            self.assertEqual(runtime['exposure']['sample_counts'], {'a': 1, 'b': 1})
+            self.assertEqual(runtime['exposure']['order_sha256'], exp.digest(exp.read_jsonl(root / 'exposure/exposure.jsonl')))
+            config.pop('study_exposure')
             config.update(adapter_path=str(root / 'no-targets'), max_seq_length=2)
             with patch.object(lora, 'load', return_value=(TinyModel(), Tokenizer())):
                 with self.assertRaisesRegex(ValueError, 'no completion'):

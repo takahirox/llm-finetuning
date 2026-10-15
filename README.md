@@ -343,3 +343,14 @@ is claimed by this implementation. No post-merge verification is required.
 - [Issue template](.github/ISSUE_TEMPLATE/issue.md)
 - [Pull request template](.github/pull_request_template.md)
 - [AI contributor entry point](AGENTS.md)
+
+## Controlled training-data size and quality studies
+
+[Issue #13 workflow](docs/data-size-quality-study.md) adds pinned noncommercial
+KodCode ingestion, audited nested 300/1,000/3,000-example subsets, a same-size
+quality/diversity comparison, actual training-exposure accounting, and locked
+new development/confirmation evaluation splits. It reuses the existing corrected
+PAD mask, Qwen checkpoint, MLX trainer and secure Docker scorer. See the guide for
+source/license restrictions, preparation, training, reporting and a small smoke
+check; [validation evidence](docs/data-study-validation.md) distinguishes actual
+coverage/checks from full model experiments not performed.

@@ -54,6 +54,7 @@ def run(configuration, variant):
                'train_batches': 0, 'validation_batches': 0}
     selected_loss = make_loss(variant)
     started = time.monotonic()
+    exposure = None
 
     def batches(*positional, **kwargs):
         for batch, lengths in trainer.iterate_batches(*positional, **kwargs):
@@ -62,9 +63,12 @@ def run(configuration, variant):
                 raise ValueError('Batch contains no intended completion targets after truncation.')
             key = 'train_batches' if kwargs.get('loop', False) else 'validation_batches'
             runtime[key] += 1
+            if key == 'train_batches' and exposure is not None:
+                exposure.observe(batch.tolist(), lengths.tolist())
             yield batch, lengths
 
     def train_with_mask(**kwargs):
+        nonlocal exposure
         runtime['trainer_calls'] += 1
         for name, key in (('train_dataset', 'train'), ('val_dataset', 'valid')):
             # CacheDataset wraps the exact ChatDataset used by this trainer.
@@ -74,6 +78,12 @@ def run(configuration, variant):
             runtime['tokenizer'] = {'pad_token_id': tokenizer.pad_token_id,
                                     'eos_token_id': tokenizer.eos_token_id,
                                     'collator_padding_id': 0}
+        if 'study_exposure' in configuration:
+            import mlx.core as mx
+            from scripts.training_exposure import Exposure
+            if mx.distributed.init().size() != 1 or args.batch_size != 1 or args.grad_accumulation_steps != 1:
+                raise ValueError('Exposure audit requires a single worker, batch size 1, no accumulation.')
+            exposure = Exposure(kwargs['train_dataset']._data, configuration)
         runtime['loss_callable'] = selected_loss.__qualname__
         write_json(runtime_path, runtime)
         return trainer.train(**kwargs, loss=selected_loss, iterate_batches=batches)
@@ -90,6 +100,8 @@ def run(configuration, variant):
     finally:
         lora.train = trainer.train
         runtime['elapsed_seconds'] = time.monotonic() - started
+        if exposure is not None:
+            runtime['exposure'] = exposure.summary()
         write_json(runtime_path, runtime)
 
 

@@ -1,0 +1,26 @@
+{
+  "kodcode": {
+    "url": "https://huggingface.co/datasets/KodCode/KodCode-Light-RL-10K/resolve/dcf78a8bbba9a613b596ce993c4921a38687dfcc/data/train-00000-of-00001.parquet",
+    "revision": "dcf78a8bbba9a613b596ce993c4921a38687dfcc",
+    "sha256": "cd777b078dd700d7e87c2f42ae2cb1d28de91625da92066fffda219eb9193c93",
+    "filename": "kodcode.parquet",
+    "license": "CC-BY-NC-4.0",
+    "attribution": "Zhangchen Xu, Yang Liu, Yueqin Yin, Mingyuan Zhou, Radha Poovendran. KodCode (2025), arXiv:2503.02951."
+  },
+  "mbpp": {
+    "url": "https://raw.githubusercontent.com/google-research/google-research/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/mbpp.jsonl",
+    "revision": "f82046ba5aabbbb427dbfd38a254d26bff08b533",
+    "sha256": "ccf64ceae9c5403bf50a044cb6d505bfd2a2963ee58338ba268fd65beab92a9f",
+    "filename": "mbpp.jsonl",
+    "license": "CC-BY-4.0",
+    "attribution": "Google Research, Austin et al., Program Synthesis with Large Language Models (2021)."
+  },
+  "humaneval": {
+    "url": "https://raw.githubusercontent.com/openai/human-eval/6d43fb980f9fee3c892a914eda09951f772ad10d/data/HumanEval.jsonl.gz",
+    "revision": "6d43fb980f9fee3c892a914eda09951f772ad10d",
+    "sha256": "b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef",
+    "filename": "humaneval.jsonl.gz",
+    "license": "MIT",
+    "attribution": "OpenAI, Chen et al., Evaluating Large Language Models Trained on Code (2021)."
+  }
+}
