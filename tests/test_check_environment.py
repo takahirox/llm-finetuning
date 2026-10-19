@@ -27,7 +27,7 @@ class EnvironmentCheckTests(unittest.TestCase):
             "sys.base_prefix": "/python",
         }
         values.update(overrides or {})
-        versions = versions or {"huggingface-hub": "2.2.0", "mlx": "0.32.3", "mlx-lm": "0.32.0"}
+        versions = versions or {"huggingface-hub": "2.2.0", "mlx": "0.32.3", "mlx-lm": "0.32.0", "pydantic": "2.12.3"}
         stdout, stderr = StringIO(), StringIO()
         with ExitStack() as stack:
             for target, value in values.items():
@@ -76,7 +76,7 @@ class EnvironmentCheckTests(unittest.TestCase):
         self.assertIn("Metal available: True", output)
         self.assertIn("Environment check passed", output)
         self.assertEqual(errors, "")
-        self.assertEqual(imports, 3)
+        self.assertEqual(imports, 4)
 
     def test_missing_distribution_has_install_instructions(self):
         class MissingPackages(dict):
@@ -96,10 +96,10 @@ class EnvironmentCheckTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertIn(str(error), errors)
                 self.assertIn("uv sync --locked", errors)
-                self.assertEqual(imports, 3)
+                self.assertEqual(imports, 4)
 
     def test_wrong_package_version_fails(self):
-        status, _, errors, _ = self.run_check(versions={"huggingface-hub": "2.2.0", "mlx": "0.1.0", "mlx-lm": "0.32.0"})
+        status, _, errors, _ = self.run_check(versions={"huggingface-hub": "2.2.0", "mlx": "0.1.0", "mlx-lm": "0.32.0", "pydantic": "2.12.3"})
         self.assertEqual(status, 1)
         self.assertIn("version differs", errors)
 
