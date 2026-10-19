@@ -1,0 +1,52 @@
+{
+  "reference_commit": "24f663d1a276203356d957d6e340ee2182ff83d8",
+  "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+  "model_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+  "split_settings": {
+    "train": [
+      600,
+      1001
+    ],
+    "valid": [
+      150,
+      2002
+    ],
+    "test": [
+      150,
+      3003
+    ]
+  },
+  "data_sha256": {
+    "train.jsonl": "71bc453748b5770c0a159cc3e5b9f25c3c1e29b448454e78865241223b483da8",
+    "valid.jsonl": "257033c06f00bb0d60e5017912e9a1afc09e15aa7825d3c15358acb6eee2068a",
+    "test.jsonl": "01706957cf37ef84955860e96aa983a0a6cc6f9a88e7ee048ebb2dc186911275"
+  },
+  "training": {
+    "train": true,
+    "test": false,
+    "fine_tune_type": "lora",
+    "optimizer": "adam",
+    "num_layers": 8,
+    "batch_size": 4,
+    "iters": 600,
+    "learning_rate": 0.0001,
+    "max_seq_length": 512,
+    "steps_per_report": 50,
+    "steps_per_eval": 150,
+    "val_batches": 25,
+    "save_every": 200,
+    "seed": 0,
+    "mask_prompt": false,
+    "lora_parameters": {
+      "rank": 8,
+      "scale": 20.0,
+      "dropout": 0.0
+    }
+  },
+  "decoding": {
+    "max_tokens": 128,
+    "temperature": 0.0,
+    "seed": 0
+  },
+  "scorer": "upstream-permissive-v1"
+}

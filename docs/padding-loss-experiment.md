@@ -91,8 +91,8 @@ Run from a single committed checkout, and keep that code/dependency environment
 unchanged across both arms and evaluations. All output paths below are ignored;
 commands refuse existing adapter directories and result files. Use a new suffix
 for reruns. Existing model conversion can be reused only if its pinned revision,
-dtype and file hashes match. See [README setup](../README.md#setup) for uv/Python
-installation and [model preparation](../README.md#1-download-and-convert-the-model-once)
+dtype and file hashes match. See [legacy README setup](../README-legacy.md#setup) for uv/Python
+installation and [model preparation](../README-legacy.md#1-download-and-convert-the-model-once)
 for model/license/storage details.
 
 ```sh

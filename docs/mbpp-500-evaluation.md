@@ -112,7 +112,7 @@ or unconfirmed cleanup abort scoring and leave the result incomplete. The CLI
 is stopped and the container forcibly removed in cleanup, including on timeouts.
 Cleanup/state operations have their own bounded deadlines. Containers reduce
 risk; use a disposable Docker VM without sensitive workloads as described in the
-[README](../README.md#4-evaluate-the-adapter-free-baseline).
+[legacy README](../README-legacy.md#4-evaluate-the-adapter-free-baseline).
 
 ## Rescore saved generations
 
