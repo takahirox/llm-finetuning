@@ -12,6 +12,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sql = [
+    "sqlglot==26.33.0",
+]
 study = [
     "pyarrow==23.0.1",
 ]

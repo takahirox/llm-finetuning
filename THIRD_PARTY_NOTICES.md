@@ -27,3 +27,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## SQL experiment provenance
+
+The SQL workflow is independently implemented after reviewing
+[W-Kaski/qwen-qlora-sql-benchmark at b90759ab610ae29a0e8744098eda6ea0d559df36](https://github.com/W-Kaski/qwen-qlora-sql-benchmark/tree/b90759ab610ae29a0e8744098eda6ea0d559df36).
+That revision has no explicit source-code license; no reference code or fixtures
+are vendored. Its scores are attributed third-party reports.
+
+Downloaded and derived SQL records credit **b-mc2 (2023), sql-create-context**,
+under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), based on WikiSQL
+(Zhong, Xiong and Socher, *Seq2SQL*, 2017) and Spider (Yu et al., *Spider*, 2018).
+Our changes are deterministic subset selection and chat-format conversion.
+[Dataset source, attribution, immutable revision and checksum](docs/sql-control.md#dataset-attribution-and-split-integrity)
+are recorded in the experiment documentation and local data manifests. Source
+records and derived splits are not committed. The Qwen model is Apache-2.0;
+model download retains its LICENSE. These licenses are separate from the
+freight reference's MIT notice above.

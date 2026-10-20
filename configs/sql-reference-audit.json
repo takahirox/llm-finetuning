@@ -1,0 +1,21 @@
+{
+  "repository": "W-Kaski/qwen-qlora-sql-benchmark",
+  "revision": "b90759ab610ae29a0e8744098eda6ea0d559df36",
+  "license": "No LICENSE file or explicit code license in README/pyproject at this revision; no source code vendored.",
+  "reviewed_files_sha256": {
+    "README.md": "f8d1e1875d2441f1b774607f8bd663d182b78e01ff09c58e43a72e9ec0f0108c",
+    "pyproject.toml": "a2fa88a156be63cc5226a52897ddc4baab6ab5879be941f977ebafdd83c0ed08",
+    "configs/dataset_sql_create_context.yaml": "763b9d4c45b23bf43c2c8451a03944bd4e14db7207c6fc8905667d51f42d268c",
+    "configs/train_lora_r8.yaml": "4c3826e0422753c7f2c69f7d6605149118b97273e33b8a867603102960b3d12c",
+    "configs/eval_lora_r8.yaml": "8dda5f20ddd076f9a1543b0b220ca1505883911caffa07c4e067e9ab2b421d89",
+    "configs/train_baseline.yaml": "586c7bd7ffb9f698785c7d00602ec3e76450fe87d76bfe7f3d63cc106a38bc34",
+    "src/qwen_qlora_sql_benchmark/data/download_sql_create_context.py": "d4fe26fe763ef1919112124ad444e7473e405968e657146e8796796f7293edde",
+    "src/qwen_qlora_sql_benchmark/data/sql_create_context.py": "f09a5641476cfb8d5f1d3fbf55d399b109081b9bfa5ff9cc8950802e2ac1c380",
+    "src/qwen_qlora_sql_benchmark/train/train_qlora.py": "0c9529ab1ff64e3410bb5cff1ba8e3697cb08d3a61e4700bc552fb7cbd0b93a0",
+    "src/qwen_qlora_sql_benchmark/eval/baseline_generation.py": "73f08ca18fa0cd0b88a4fa9eebc247f5f730281e1c23c940bd36cf2c2eb9ff36",
+    "src/qwen_qlora_sql_benchmark/eval/adapter_generation.py": "b43c173d8b48ca9e0bcab5a9528694575126edde8ad724ef27dfed1ea06873b3",
+    "src/qwen_qlora_sql_benchmark/eval/exact_match.py": "3fd2f2e6f78bfc8f42d7094dec598afa18499ef648202a8245394875439a59f8",
+    "src/qwen_qlora_sql_benchmark/eval/sql_metrics.py": "24b670bec390a1a603bfcb54521b81e744f06d9c94cea52e03c2c7a1fc7ae30e",
+    "docs/EXECUTION_EVAL.md": "7420190db0ce449b79b13b70e602b12c71bb7474019770268e1963052544fee3"
+  }
+}
