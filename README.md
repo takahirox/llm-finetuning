@@ -94,6 +94,14 @@ changed-code, incompatible-training, or different-protocol receipts are rejected
 To compare an old run after changing experiment code, check out its recorded
 source revision in another worktree; do not edit historical receipts.
 
+## SQL code-generation control
+
+A separate [SQL LoRA experiment](docs/sql-control.md) provides pinned data/model
+revisions, fresh rank-8 MLX training, paired base/adapter metrics, and a small
+SQLite execution sanity check. The implementation is tested; the full SQL model
+experiment has **not been performed**, so no SQL accuracy gain is claimed.
+This narrow code-generation control does not establish general programming ability.
+
 ## Checks
 
 ```sh
