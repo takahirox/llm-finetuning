@@ -22,6 +22,8 @@ Watch for unnecessary abstractions, speculative extensibility, unrelated refacto
 
 Verify that behavior matches the expected outcome, the implementation fits the actual repository structure, and documentation remains accurate and consistent.
 
+Review applicable interface changes against the README's [UI/UX principles](../README.md#uiux).
+
 Check that validation is sufficient for the changed files and actual tooling. Examine evidence for checks actually performed and accurately reported results, including failures, skipped checks, and unperformed checks with reasons. Do not infer success from missing evidence.
 
 The repository currently has no application/test scaffold or CI. For templates/documentation-only changes, check syntax, links, whitespace, and consistency using applicable available tooling. Do not invent commands or require unrelated runtime suites, new runtime tests, hardware/device checks, or deployed-site verification solely for documentation changes.
