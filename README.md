@@ -120,6 +120,8 @@ consent, destructive-action safeguards, and necessary warnings.
 
 ## Checks
 
+Choose applicable validation using the [test and CI performance principles](docs/development-flow.md#test-and-ci-performance-principles).
+
 ```sh
 uv lock --check
 uv pip check

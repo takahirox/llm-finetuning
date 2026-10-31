@@ -28,11 +28,22 @@ Inspect the current repository structure, instructions, and tooling. Choose the 
 
 Choose checks appropriate to the changed files and actual repository tooling. Run applicable checks and accurately record their results, including failures, skipped checks, and unperformed checks with reasons.
 
-The repository currently has no application scaffold, build/test commands, training setup, or CI. Do not invent commands, pipelines, dependencies, or CI merely to document a process. If implementation tooling is added later, inspect and use the actual setup.
+Use the [README checks](../README.md#checks) and relevant experiment guides for the current `uv`, `unittest`, and native MLX validation commands. There are no CI workflows configured. Follow the [test and CI performance principles](#test-and-ci-performance-principles) when selecting checks or proposing future automation; do not introduce tooling merely to document a process.
 
 For a templates/documentation-only change, check template/Markdown syntax, links, whitespace, and consistency using applicable available tooling. No new runtime tests, hardware/device checks, or deployed-site verification are required solely for such a change.
 
 Write a concise English commit message describing what changed and why, and reference the source Issue.
+
+### Test and CI performance principles
+
+**Detect the required failures at the lightest appropriate layer, without redundant execution.** Preserve required correctness, regressions, and meaningful integration coverage when redistributing checks.
+
+1. **Prefer the lightest meaningful layer.** Use fast `unittest` checks for data splits, schema/scoring, branches, and receipt compatibility. Use the opt-in native MLX tests for actual masking, gradients, and LoRA integration; reserve real-model training/evaluation and legacy Docker execution for boundaries that require them. Add tests that catch concrete defects rather than mirror implementation.
+2. **Choose combinations deliberately.** Cover distinct processing paths with representative data, models, mask variants, and adapter states. Exhaust combinations when their interactions require it, rather than multiplying every model, dataset size, seed, and evaluation path. Retain required regression cases and fixed experimental protocols.
+3. **Match validation to the change.** Documentation-only changes need Markdown/link/consistency/whitespace checks. CLI/UI changes need relevant argument, message, and behavior checks; core/runtime changes need affected tests and applicable native integration checks. Dependency/build or future CI changes need environment/lock and affected execution-path checks. Use focused checks for fast feedback and the applicable full regression suite before merge; a focused pass does not replace required coverage. Report skipped native tests or missing extras explicitly. Full model experiments are optional unless the Issue requires them. Keep mandatory pre-merge checks applicable, optional validation labeled, and genuinely post-merge-only publication checks separate. No training or publication currently starts on merge.
+4. **Reuse work and avoid duplicate execution.** Reuse compatible downloads, converted models, and prepared fixtures with keys covering source revisions, configuration, and environment, while keeping runs isolated. Preserve fresh training, new output paths, provenance checks, and immutable historical receipts; reuse must not substitute stale results for required execution. If CI is added, avoid equivalent push/PR runs for one revision, cancel superseded runs when safe, and preserve necessary deployment ordering. Assess parallel execution of independent work using measured CPU, Metal memory, and computation costs rather than assuming more workers help.
+5. **Review added assurance and cost together.** Identify the additional defect each new or expanded test detects, whether existing coverage supplies that assurance, and its execution/maintenance cost. Watch repeated model/compiler/container setup, large fixtures, long generation or training loops, and Cartesian-product growth. Keep meaningful assertions and necessary isolation.
+6. **Maintain an execution-time budget.** Normal-CI elapsed time and total runner/computation time are unmeasured here; no target is established. Historical experiment timings are not a CI baseline. Establish a representative baseline and target during actual test/CI performance work, track growth, and investigate overruns by revisiting structure and duplication while retaining required coverage. Record elapsed feedback time, total runner/computation time, and queue time separately. This guidance adds no benchmark, hardware purchase, or merge gate.
 
 ## 3. Create a Pull Request for the Issue
 
