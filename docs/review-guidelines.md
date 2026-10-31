@@ -26,7 +26,11 @@ Review applicable interface changes against the README's [UI/UX principles](../R
 
 Check that validation is sufficient for the changed files and actual tooling. Examine evidence for checks actually performed and accurately reported results, including failures, skipped checks, and unperformed checks with reasons. Do not infer success from missing evidence.
 
-The repository currently has no application/test scaffold or CI. For templates/documentation-only changes, check syntax, links, whitespace, and consistency using applicable available tooling. Do not invent commands or require unrelated runtime suites, new runtime tests, hardware/device checks, or deployed-site verification solely for documentation changes.
+Use the [README checks](../README.md#checks) and relevant experiment guides for the existing `unittest` and opt-in native MLX checks; there are no CI workflows configured. For templates/documentation-only changes, check syntax, links, whitespace, and consistency using applicable available tooling. Do not invent commands or require unrelated runtime suites, new runtime tests, hardware/device checks, or deployed-site verification solely for documentation changes.
+
+Apply the [test and CI performance principles](development-flow.md#test-and-ci-performance-principles): review the additional defects covered, duplication with existing checks, and added execution/maintenance cost. Ask:
+
+> Does this change provide sufficient confidence with the lightest appropriate validation, without redundant execution?
 
 ## Check Pre-Merge Acceptance and Post-Merge Verification
 
