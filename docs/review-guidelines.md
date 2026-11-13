@@ -12,7 +12,7 @@ Ask whether the PR is a complete and appropriately scoped solution to the Issue 
 
 Verify that all claimed requirements are implemented. Do not approve a PR as closing an Issue when important implementation requirements remain unresolved.
 
-If the change is intentionally partial, the PR should explicitly describe that scope and the Issue should remain open. Recorded verification possible only after merge does not make an otherwise complete implementation partial.
+If the change is intentionally partial, the PR should explicitly describe the completed and remaining scope and omit automatic closing references for the parent Issue, which should remain open. Recorded verification possible only after merge does not make an otherwise complete implementation partial.
 
 ## Check for Unnecessary Work
 
@@ -40,6 +40,8 @@ Checks possible only after merge must not be prerequisites for pre-merge approva
 
 Record genuinely required post-merge verification separately and report it as pending until performed. Pre-merge evidence does not prove deployment or publication succeeded. This distinction does not waive implementation requirements or applicable pre-merge checks. Do not add post-merge work routinely; state that none is required when applicable.
 
+Preserve the normal `Closes #N` reference for a fully implemented Issue whose mandatory pre-merge acceptance is satisfied. Do not request removing it, keeping the source Issue open, or withholding approval solely because post-merge-only checks are pending. ProjectWeave publication restores that reference and merge/close stages close the Issue; contrary review requests cause repeated Review → Fix → Publish → Review loops. Missing implementation, mandatory pre-merge tests, required protections, and genuinely necessary pre-merge human acceptance remain blockers.
+
 ## Review Outcome and Next Action
 
 Distinguish these outcomes clearly:
@@ -50,6 +52,6 @@ Distinguish these outcomes clearly:
 
 Do not require routine human confirmation when an agent can execute and verify the criteria. Nonblocking suggestions and optional checks should be labeled accordingly and should not prevent approval.
 
-Required checks possible only after merge do not block approval when recorded separately as pending. After merge, report their actual results, including failures and any follow-up; do not mark them complete until performed.
+After successful merge, close the fully implemented source Issue, then perform any genuinely required post-merge verification under the [development lifecycle](development-flow.md#7-perform-required-post-merge-verification). Record evidence in the merged PR, closed Issue, or linked validation report. Report pending, unperformed, or environment-blocked checks with reasons; closure does not claim they passed, and an unavailable environment alone does not establish a defect. For actual defects, check for an equivalent Issue first, then use it or create a new linked Issue with reproduction steps, affected revision, expected/actual behavior, and original Issue/PR links. Do not reopen the original Issue solely for this follow-up. The current lifecycle supersedes older keep-open instructions without rewriting historical results or changing verification requirements.
 
 Adapted from GitWeave's [review guidelines](https://github.com/takahirox/gitweave/blob/main/docs/review-guidelines.md).
