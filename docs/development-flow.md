@@ -30,7 +30,7 @@ Choose checks appropriate to the changed files and actual repository tooling. Ru
 
 Use the [README checks](../README.md#checks) and relevant experiment guides for the current `uv`, `unittest`, and native MLX validation commands. There are no CI workflows configured. Follow the [test and CI performance principles](#test-and-ci-performance-principles) when selecting checks or proposing future automation; do not introduce tooling merely to document a process.
 
-For a templates/documentation-only change, check template/Markdown syntax, links, whitespace, and consistency using applicable available tooling. No new runtime tests, hardware/device checks, or deployed-site verification are required solely for such a change.
+For a templates/documentation-only change, check template/Markdown syntax, links, whitespace, and consistency using applicable available tooling. No routine manual approval, new runtime tests, hardware/device checks, heavyweight model downloads, or deployment gates are required solely for such a change.
 
 Write a concise English commit message describing what changed and why, and reference the source Issue.
 
@@ -56,7 +56,7 @@ Propose the implementation through a PR targeting `main`, unless the source Issu
 - failures, skipped checks, and unperformed checks with reasons
 - any genuinely required post-merge verification, separately reported as pending
 
-A PR should claim to close an Issue only when it fully addresses the Issue's implementation requirements. If it is intentionally partial, say so and keep the Issue open. Pending checks possible only after merge do not make an otherwise complete implementation partial, but do not claim those checks passed.
+Use the normal `Closes #N` reference when the PR fully addresses the Issue's implementation requirements and applicable mandatory pre-merge acceptance is satisfied. If it is intentionally partial, describe the completed and remaining scope, keep the parent Issue open, and omit automatic closing references for that Issue. Pending checks possible only after merge do not make an otherwise complete implementation partial, but do not claim those checks passed.
 
 ## 4. Review Before Merge
 
@@ -74,16 +74,25 @@ When genuinely necessary human input is missing, record the specific question, w
 
 Approve and merge through the authorized workflow when the implementation is sufficient, mandatory pre-merge checks pass, and no blocking review findings remain. Required checks possible only after merge do not block approval when recorded separately as pending.
 
+After successful merge, close the fully implemented source Issue through the normal closing reference or authorized workflow, then perform any required post-merge verification. Issue closure does not claim that pending checks passed. Missing implementation, mandatory pre-merge tests, required protections, and genuinely necessary pre-merge human acceptance remain blockers.
+
+ProjectWeave publication adds `Closes #N`, and its merge/close stages close the source Issue. Review must not request removing that reference, keeping the Issue open, or withholding approval solely because post-merge-only verification is pending. Doing so makes review and publication undo each other in a repeated Review → Fix → Publish → Review loop.
+
 ## 7. Perform Required Post-Merge Verification
 
-If required checks were recorded, perform them after merge and report actual results, including failures and follow-up work. Keep them pending until performed. Pre-merge evidence does not prove deployment or publication succeeded. When no post-merge verification is required, no additional step is needed.
+If required checks were recorded, perform them after merge and Issue closure. Record actual results and evidence in the merged PR, closed Issue, or a linked validation report. Report unperformed, pending, or environment-blocked checks honestly, including the reason; keep them pending until performed. Pre-merge evidence does not prove deployment or publication succeeded. An unavailable test environment alone is not evidence of a product defect. When no post-merge verification is required, no additional step is needed.
+
+If verification reveals an actual defect, first check for an existing equivalent Issue. Use that Issue or create a new linked Issue with reproduction steps, the affected revision, expected and actual behavior, and links to the original Issue and PR. Do not keep or reopen the original Issue solely for post-merge follow-up.
+
+This lifecycle supersedes older instructions to keep an implemented Issue open solely until post-merge verification finishes. Preserve historical test outcomes and evidence; this guidance does not rewrite them or change existing verification requirements.
 
 The normal flow is:
 
 ```text
 Issue → implementation and validation → PR → review
   → revision or wait for necessary human input, then review again
-  → merge → post-merge verification (only if required)
+  → merge and close the source Issue → post-merge verification (only if required)
+  → if a defect is found, use an existing equivalent Issue or create a new linked Issue
 ```
 
 Adapted from GitWeave's [development flow](https://github.com/takahirox/gitweave/blob/main/docs/development-flow.md), [Issue template](https://github.com/takahirox/gitweave/blob/main/.github/ISSUE_TEMPLATE/issue.md), and [PR template](https://github.com/takahirox/gitweave/blob/main/.github/pull_request_template.md).
