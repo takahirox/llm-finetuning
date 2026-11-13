@@ -17,7 +17,7 @@ Describe what should be true when the Issue is resolved.
 
 ## Context
 
-Add relevant examples, logs, constraints, or related Issues. Include reproduction steps and actual versus expected behavior where applicable.
+Add relevant examples, logs, constraints, or related Issues. Include reproduction steps and actual versus expected behavior where applicable. For a post-merge defect, first check for an equivalent Issue; use it or file a new linked Issue with the affected revision and original Issue/PR links rather than reopening the original Issue.
 
 ## Pre-merge acceptance
 
@@ -36,3 +36,5 @@ List useful additional checks that are not required for completion, or state tha
 Record genuinely necessary checks possible only after merge, or state that none are required. Do not add post-merge work routinely.
 
 For example, if merging triggers deployment, publication and published-site verification belong here. Report required checks as pending until performed; pre-merge validation does not prove deployment or publication succeeded. See the [review guidance](https://github.com/takahirox/llm-finetuning/blob/main/docs/review-guidelines.md#check-pre-merge-acceptance-and-post-merge-verification).
+
+Follow the [post-merge lifecycle](https://github.com/takahirox/llm-finetuning/blob/main/docs/development-flow.md#7-perform-required-post-merge-verification): merge and close a fully implemented Issue once mandatory pre-merge acceptance is satisfied, then perform required verification and record evidence. Pending post-merge-only checks do not make implementation partial, block approval, or require keeping the Issue open; closure does not claim they passed.
